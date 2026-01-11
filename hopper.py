@@ -110,6 +110,13 @@ def get_user_profile(user_id, guild_id):
 
 async def post_member_list(guild, channel):
     """Postet die Mitgliederliste nach Land und Heimatverein sortiert in den angegebenen Kanal."""
+    # Lösche alle Nachrichten im Kanal
+    try:
+        await channel.purge(limit=100)
+        print(f'Nachrichten im Kanal {channel.name} gelöscht.')
+    except Exception as e:
+        print(f'Fehler beim Löschen der Nachrichten: {e}')
+    
     # Gruppiere Mitglieder nach Land und Verein
     countries = {}  # Format: {land: {club_name: [members]}}
     
@@ -254,11 +261,7 @@ async def ask_user_questions(member, guild, welcome_channel):
         lineup_channel = bot.get_channel(CHANNEL_ID)
         if lineup_channel:
             try:
-                # Lösche alle Nachrichten im Kanal
-                await lineup_channel.purge(limit=100)
-                print(f'Nachrichten im Kanal {lineup_channel.name} gelöscht.')
-                
-                # Poste die aktualisierte Mitgliederliste
+                # Poste die aktualisierte Mitgliederliste (Löschen geschieht in post_member_list)
                 await post_member_list(guild, lineup_channel)
             except Exception as e:
                 print(f'Fehler beim Aktualisieren der Mitgliederliste: {e}')
