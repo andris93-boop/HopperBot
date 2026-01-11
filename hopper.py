@@ -2,6 +2,8 @@ import discord
 from discord.ext import commands
 import os
 from dotenv import load_dotenv
+import sqlite3
+import asyncio
 
 # Lade die Umgebungsvariablen aus der .env Datei
 load_dotenv()
@@ -19,6 +21,61 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True  # Benötigt, um Mitglieder abzurufen
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Datenbank initialisieren
+def init_database():
+    """Erstellt die SQLite-Datenbank und die Tabelle für Nutzerprofile."""
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            user_id INTEGER,
+            guild_id INTEGER,
+            heimatverein TEXT,
+            wohnort TEXT,
+            tausch_bereitschaft TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, guild_id)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    print('Datenbank initialisiert.')
+
+# Datenbank beim Start initialisieren
+init_database()
+
+def save_user_profile(user_id, guild_id, heimatverein, wohnort, tausch_bereitschaft):
+    """Speichert das Nutzerprofil in der Datenbank."""
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT OR REPLACE INTO user_profiles 
+        (user_id, guild_id, heimatverein, wohnort, tausch_bereitschaft)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (user_id, guild_id, heimatverein, wohnort, tausch_bereitschaft))
+    
+    conn.commit()
+    conn.close()
+
+def get_user_profile(user_id, guild_id):
+    """Lädt das Nutzerprofil aus der Datenbank."""
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT heimatverein, wohnort, tausch_bereitschaft, created_at
+        FROM user_profiles
+        WHERE user_id = ? AND guild_id = ?
+    ''', (user_id, guild_id))
+    
+    result = cursor.fetchone()
+    conn.close()
+    
+    return result
 
 @bot.event
 async def on_ready():
@@ -63,12 +120,79 @@ async def on_ready():
     print(f'Anzahl der Mitglieder: {guild.member_count}')
 
 
+async def ask_user_questions(member, guild):
+    """Stellt dem neuen Mitglied Fragen und speichert die Antworten."""
+    
+    def check(message):
+        return message.author == member and isinstance(message.channel, discord.DMChannel)
+    
+    try:
+        # Versuche, eine DM zu senden
+        await member.send(
+            f"Hallo {member.name}! Willkommen auf dem Server **{guild.name}** ⚽\n\n"
+            "Bitte beantworte ein paar Fragen, damit wir dich besser kennenlernen können.\n\n"
+            "**Frage 1/3:** Was ist dein Heimatfußballverein?"
+        )
+        
+        # Warte auf Antwort 1
+        try:
+            msg1 = await bot.wait_for('message', check=check, timeout=300.0)
+            heimatverein = msg1.content
+        except asyncio.TimeoutError:
+            await member.send("⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
+            return False
+        
+        # Frage 2
+        await member.send("**Frage 2/3:** Wo wohnst du? (Stadt/Region)")
+        try:
+            msg2 = await bot.wait_for('message', check=check, timeout=300.0)
+            wohnort = msg2.content
+        except asyncio.TimeoutError:
+            await member.send("⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
+            return False
+        
+        # Frage 3
+        await member.send(
+            "**Frage 3/3:** Bist du bereit, Devotionalien (Trikots, Schals, etc.) zu tauschen?\n"
+            "Antworte mit: **Ja**, **Nein** oder **Vielleicht**"
+        )
+        try:
+            msg3 = await bot.wait_for('message', check=check, timeout=300.0)
+            tausch_bereitschaft = msg3.content
+        except asyncio.TimeoutError:
+            await member.send("⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
+            return False
+        
+        # Speichere die Daten in der Datenbank
+        save_user_profile(member.id, guild.id, heimatverein, wohnort, tausch_bereitschaft)
+        
+        await member.send(
+            "✅ Vielen Dank! Deine Angaben wurden gespeichert.\n\n"
+            f"**Heimatverein:** {heimatverein}\n"
+            f"**Wohnort:** {wohnort}\n"
+            f"**Tauschbereitschaft:** {tausch_bereitschaft}\n\n"
+            "Ein Admin wird dich in Kürze freischalten. Bis gleich! ⚽"
+        )
+        
+        return True
+        
+    except discord.Forbidden:
+        # Nutzer hat DMs deaktiviert
+        welcome_channel = guild.get_channel(WELCOME_CHANNEL_ID)
+        if welcome_channel:
+            await welcome_channel.send(
+                f"{member.mention}, ich konnte dir keine Direktnachricht senden. "
+                "Bitte aktiviere DMs von Server-Mitgliedern oder kontaktiere einen Admin."
+            )
+        return False
+
 @bot.event
 async def on_member_join(member):
     """Wenn ein neues Mitglied dem Server beitritt:
     - Rolle `newcommer` zuweisen (erstellt, falls nicht vorhanden)
     - Der Rolle nur Zugriff auf den Welcome-Kanal geben
     - In anderen Kanälen Sichtbarkeit entziehen
+    - Fragen stellen und Antworten speichern
     """
     guild = member.guild
 
@@ -93,7 +217,7 @@ async def on_member_join(member):
                 await channel.set_permissions(role, view_channel=True, send_messages=True, read_message_history=True)
                 if isinstance(channel, discord.TextChannel):
                     try:
-                        await channel.send(f'Willkommen {member.mention}! Du wurdest als Newcomer zugewiesen.')
+                        await channel.send(f'Willkommen {member.mention}! Bitte prüfe deine Direktnachrichten. 📬')
                     except Exception:
                         pass
             else:
@@ -101,6 +225,30 @@ async def on_member_join(member):
                 await channel.set_permissions(role, view_channel=False)
         except Exception as e:
             print(f'Fehler beim Setzen von Berechtigungen für Kanal {getattr(channel, "name", channel.id)}: {e}')
+    
+    # Stelle die Fragen
+    success = await ask_user_questions(member, guild)
+    if success:
+        print(f'Profil für {member.name} erfolgreich gespeichert.')
+
+@bot.command(name='profil')
+async def show_profile(ctx, member: discord.Member = None):
+    """Zeigt das Profil eines Nutzers an."""
+    if member is None:
+        member = ctx.author
+    
+    profile = get_user_profile(member.id, ctx.guild.id)
+    
+    if profile:
+        heimatverein, wohnort, tausch_bereitschaft, created_at = profile
+        embed = discord.Embed(title=f"Profil von {member.display_name}", color=discord.Color.blue())
+        embed.add_field(name="⚽ Heimatverein", value=heimatverein, inline=False)
+        embed.add_field(name="📍 Wohnort", value=wohnort, inline=False)
+        embed.add_field(name="🔄 Tauschbereitschaft", value=tausch_bereitschaft, inline=False)
+        embed.set_footer(text=f"Erstellt am: {created_at}")
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send(f"Für {member.display_name} wurde kein Profil gefunden.")
 
 # Starte den Bot
 bot.run(TOKEN)
