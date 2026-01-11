@@ -95,17 +95,23 @@ async def on_ready():
         print(f'Kanal mit ID {CHANNEL_ID} wurde nicht gefunden.')
         return
     
-    # Erstelle eine Liste aller Nutzer
-    member_list = []
+    # Gruppiere Mitglieder nach Heimatverein (aus der DB, sonst 'Unbekannt')
+    clubs = {}
     for member in guild.members:
+        data = get_user_profile(member.id, guild.id)
+        heimat = (data[0].strip() if data and data[0] else 'Unbekannt')
+
         status_emoji = "🟢" if member.status == discord.Status.online else "⚪"
-        member_list.append(f"{status_emoji} {member.name} ({member.display_name})")
-    
-    # Erstelle die Nachricht
+        entry = f"{status_emoji} {member.display_name} ({member.name})"
+        clubs.setdefault(heimat, []).append(entry)
+
+    # Erstelle die Nachricht gruppiert nach Heimatverein
     message = f"**Server: {guild.name}**\n"
     message += f"**Anzahl der Mitglieder: {guild.member_count}**\n\n"
-    message += "**Mitgliederliste:**\n"
-    message += "\n".join(member_list)
+    for club in sorted(clubs.keys(), key=lambda s: (s == 'Unbekannt', s.lower())):
+        members = clubs[club]
+        message += f"**{club}** ({len(members)})\n"
+        message += "\n".join(members) + "\n\n"
     
     # Sende die Nachricht (aufgeteilt, falls zu lang)
     if len(message) > 2000:
@@ -120,16 +126,16 @@ async def on_ready():
     print(f'Anzahl der Mitglieder: {guild.member_count}')
 
 
-async def ask_user_questions(member, guild):
-    """Stellt dem neuen Mitglied Fragen und speichert die Antworten."""
+async def ask_user_questions(member, guild, welcome_channel):
+    """Stellt dem neuen Mitglied Fragen im Welcome-Kanal und speichert die Antworten."""
     
     def check(message):
-        return message.author == member and isinstance(message.channel, discord.DMChannel)
+        return message.author == member and message.channel.id == WELCOME_CHANNEL_ID
     
     try:
-        # Versuche, eine DM zu senden
-        await member.send(
-            f"Hallo {member.name}! Willkommen auf dem Server **{guild.name}** ⚽\n\n"
+        # Sende die erste Frage im Welcome-Kanal
+        await welcome_channel.send(
+            f"{member.mention}, willkommen auf dem Server **{guild.name}** ⚽\n\n"
             "Bitte beantworte ein paar Fragen, damit wir dich besser kennenlernen können.\n\n"
             "**Frage 1/3:** Was ist dein Heimatfußballverein?"
         )
@@ -139,51 +145,55 @@ async def ask_user_questions(member, guild):
             msg1 = await bot.wait_for('message', check=check, timeout=300.0)
             heimatverein = msg1.content
         except asyncio.TimeoutError:
-            await member.send("⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
+            await welcome_channel.send(f"{member.mention} ⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
             return False
         
         # Frage 2
-        await member.send("**Frage 2/3:** Wo wohnst du? (Stadt/Region)")
+        await welcome_channel.send(f"{member.mention} **Frage 2/3:** Wo wohnst du? (Stadt/Region)")
         try:
             msg2 = await bot.wait_for('message', check=check, timeout=300.0)
             wohnort = msg2.content
         except asyncio.TimeoutError:
-            await member.send("⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
+            await welcome_channel.send(f"{member.mention} ⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
             return False
         
         # Frage 3
-        await member.send(
-            "**Frage 3/3:** Bist du bereit, Devotionalien (Trikots, Schals, etc.) zu tauschen?\n"
+        await welcome_channel.send(
+            f"{member.mention} **Frage 3/3:** Bist du bereit, Devotionalien (Trikots, Schals, etc.) zu tauschen?\n"
             "Antworte mit: **Ja**, **Nein** oder **Vielleicht**"
         )
         try:
             msg3 = await bot.wait_for('message', check=check, timeout=300.0)
             tausch_bereitschaft = msg3.content
         except asyncio.TimeoutError:
-            await member.send("⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
+            await welcome_channel.send(f"{member.mention} ⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
             return False
         
         # Speichere die Daten in der Datenbank
         save_user_profile(member.id, guild.id, heimatverein, wohnort, tausch_bereitschaft)
         
-        await member.send(
-            "✅ Vielen Dank! Deine Angaben wurden gespeichert.\n\n"
+        # Entferne die Newcomer-Rolle für automatische Freischaltung
+        role = guild.get_role(NEWCOMER_ROLE_ID)
+        if role and role in member.roles:
+            try:
+                await member.remove_roles(role, reason='Onboarding abgeschlossen')
+                print(f'Newcomer-Rolle von {member.name} entfernt - automatisch freigeschaltet')
+            except Exception as e:
+                print(f'Fehler beim Entfernen der Rolle: {e}')
+        
+        await welcome_channel.send(
+            f"{member.mention} ✅ Vielen Dank! Deine Angaben wurden gespeichert.\n\n"
             f"**Heimatverein:** {heimatverein}\n"
             f"**Wohnort:** {wohnort}\n"
             f"**Tauschbereitschaft:** {tausch_bereitschaft}\n\n"
-            "Ein Admin wird dich in Kürze freischalten. Bis gleich! ⚽"
+            "Du wurdest freigeschaltet und hast jetzt Zugriff auf alle Kanäle! Viel Spaß! ⚽"
         )
         
         return True
         
-    except discord.Forbidden:
-        # Nutzer hat DMs deaktiviert
-        welcome_channel = guild.get_channel(WELCOME_CHANNEL_ID)
-        if welcome_channel:
-            await welcome_channel.send(
-                f"{member.mention}, ich konnte dir keine Direktnachricht senden. "
-                "Bitte aktiviere DMs von Server-Mitgliedern oder kontaktiere einen Admin."
-            )
+    except Exception as e:
+        print(f"Fehler beim Stellen der Fragen: {e}")
+        await welcome_channel.send(f"{member.mention} Es gab einen Fehler. Bitte kontaktiere einen Admin.")
         return False
 
 @bot.event
@@ -210,26 +220,26 @@ async def on_member_join(member):
         print(f'Fehler beim Zuweisen der Rolle an {member}: {e}')
 
     # Setze Kanalberechtigungen: Nur Welcome-Kanal sichtbar
+    welcome_channel = None
     for channel in guild.channels:
         try:
             if channel.id == WELCOME_CHANNEL_ID:
+                welcome_channel = channel
                 # Erlaube Sichtbarkeit und Nachrichten im Welcome-Kanal
                 await channel.set_permissions(role, view_channel=True, send_messages=True, read_message_history=True)
-                if isinstance(channel, discord.TextChannel):
-                    try:
-                        await channel.send(f'Willkommen {member.mention}! Bitte prüfe deine Direktnachrichten. 📬')
-                    except Exception:
-                        pass
             else:
                 # Verberge alle anderen Kanäle für diese Rolle
                 await channel.set_permissions(role, view_channel=False)
         except Exception as e:
             print(f'Fehler beim Setzen von Berechtigungen für Kanal {getattr(channel, "name", channel.id)}: {e}')
     
-    # Stelle die Fragen
-    success = await ask_user_questions(member, guild)
-    if success:
-        print(f'Profil für {member.name} erfolgreich gespeichert.')
+    # Stelle die Fragen im Welcome-Kanal
+    if welcome_channel:
+        success = await ask_user_questions(member, guild, welcome_channel)
+        if success:
+            print(f'Profil für {member.name} erfolgreich gespeichert.')
+    else:
+        print(f'Welcome-Kanal mit ID {WELCOME_CHANNEL_ID} nicht gefunden.')
 
 @bot.command(name='profil')
 async def show_profile(ctx, member: discord.Member = None):
