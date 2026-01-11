@@ -43,7 +43,6 @@ def init_database():
             user_id INTEGER,
             guild_id INTEGER,
             club_id INTEGER,
-            wohnort TEXT,
             tausch_bereitschaft TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, guild_id),
@@ -78,16 +77,16 @@ def get_or_create_club(name, country):
     conn.close()
     return club_id
 
-def save_user_profile(user_id, guild_id, club_id, wohnort, tausch_bereitschaft):
+def save_user_profile(user_id, guild_id, club_id, tausch_bereitschaft):
     """Speichert das Nutzerprofil in der Datenbank."""
     conn = sqlite3.connect('hopper_bot.db')
     cursor = conn.cursor()
     
     cursor.execute('''
         INSERT OR REPLACE INTO user_profiles 
-        (user_id, guild_id, club_id, wohnort, tausch_bereitschaft)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, guild_id, club_id, wohnort, tausch_bereitschaft))
+        (user_id, guild_id, club_id, tausch_bereitschaft)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, guild_id, club_id, tausch_bereitschaft))
     
     conn.commit()
     conn.close()
@@ -98,7 +97,7 @@ def get_user_profile(user_id, guild_id):
     cursor = conn.cursor()
     
     cursor.execute('''
-        SELECT c.name, c.country, up.wohnort, up.tausch_bereitschaft, up.created_at
+        SELECT c.name, c.country, up.tausch_bereitschaft, up.created_at
         FROM user_profiles up
         LEFT JOIN clubs c ON up.club_id = c.id
         WHERE up.user_id = ? AND up.guild_id = ?
@@ -126,8 +125,7 @@ async def post_member_list(guild, channel):
             club_name = 'Unbekannt'
             country = 'Unbekannt'
 
-        status_emoji = "🟢" if member.status == discord.Status.online else "⚪"
-        entry = f"{status_emoji} {member.display_name} ({member.name})"
+        entry = member.name
         
         # Gruppiere nach Land und Club
         if country not in countries:
@@ -222,28 +220,19 @@ async def ask_user_questions(member, guild, welcome_channel):
         club_id = get_or_create_club(heimatverein, land)
         
         # Frage 3
-        await welcome_channel.send(f"{member.mention} **Frage 3/4:** Wo wohnst du? (Stadt/Region)")
-        try:
-            msg3 = await bot.wait_for('message', check=check, timeout=300.0)
-            wohnort = msg3.content
-        except asyncio.TimeoutError:
-            await welcome_channel.send(f"{member.mention} ⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
-            return False
-        
-        # Frage 4
         await welcome_channel.send(
-            f"{member.mention} **Frage 4/4:** Bist du bereit, Devotionalien (Trikots, Schals, etc.) zu tauschen?\n"
+            f"{member.mention} **Frage 3/3:** Bist du bereit, Devotionalien (Trikots, Schals, etc.) zu tauschen?\n"
             "Antworte mit: **Ja**, **Nein** oder **Vielleicht**"
         )
         try:
-            msg4 = await bot.wait_for('message', check=check, timeout=300.0)
-            tausch_bereitschaft = msg4.content
+            msg3 = await bot.wait_for('message', check=check, timeout=300.0)
+            tausch_bereitschaft = msg3.content
         except asyncio.TimeoutError:
             await welcome_channel.send(f"{member.mention} ⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
             return False
         
         # Speichere die Daten in der Datenbank
-        save_user_profile(member.id, guild.id, club_id, wohnort, tausch_bereitschaft)
+        save_user_profile(member.id, guild.id, club_id, tausch_bereitschaft)
         
         # Entferne die Newcomer-Rolle für automatische Freischaltung
         role = guild.get_role(NEWCOMER_ROLE_ID)
@@ -257,7 +246,6 @@ async def ask_user_questions(member, guild, welcome_channel):
         await welcome_channel.send(
             f"{member.mention} ✅ Vielen Dank! Deine Angaben wurden gespeichert.\n\n"
             f"**Heimatverein:** {heimatverein} ({land})\n"
-            f"**Wohnort:** {wohnort}\n"
             f"**Tauschbereitschaft:** {tausch_bereitschaft}\n\n"
             "Du wurdest freigeschaltet und hast jetzt Zugriff auf alle Kanäle! Viel Spaß! ⚽"
         )
@@ -336,11 +324,10 @@ async def show_profile(ctx, member: discord.Member = None):
     profile = get_user_profile(member.id, ctx.guild.id)
     
     if profile:
-        club_name, club_country, wohnort, tausch_bereitschaft, created_at = profile
+        club_name, club_country, tausch_bereitschaft, created_at = profile
         embed = discord.Embed(title=f"Profil von {member.display_name}", color=discord.Color.blue())
         embed.add_field(name="⚽ Heimatverein", value=f"{club_name} ({club_country})", inline=False)
-        embed.add_field(name="📍 Wohnort", value=wohnort, inline=False)
-        embed.add_field(name="🔄 Tauschbereitschaft", value=tausch_bereitschaft, inline=False)
+        embed.add_field(name=" Tauschbereitschaft", value=tausch_bereitschaft, inline=False)
         embed.set_footer(text=f"Erstellt am: {created_at}")
         await ctx.send(embed=embed)
     else:
