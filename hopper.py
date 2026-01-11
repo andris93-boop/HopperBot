@@ -77,27 +77,13 @@ def get_user_profile(user_id, guild_id):
     
     return result
 
-@bot.event
-async def on_ready():
-    print(f'{bot.user} ist eingeloggt!')
-    
-    # Finde den Server (Guild)
-    guild = bot.get_guild(GUILD_ID)
-    
-    if not guild:
-        print(f'Server mit ID {GUILD_ID} wurde nicht gefunden.')
-        return
-    
-    # Finde den Kanal
-    channel = bot.get_channel(CHANNEL_ID)
-    
-    if not channel:
-        print(f'Kanal mit ID {CHANNEL_ID} wurde nicht gefunden.')
-        return
-    
+async def post_member_list(guild, channel):
+    """Postet die Mitgliederliste nach Heimatverein sortiert in den angegebenen Kanal."""
     # Gruppiere Mitglieder nach Heimatverein (aus der DB, sonst 'Unbekannt')
     clubs = {}
     for member in guild.members:
+        if member.bot:
+            continue  # Überspringe Bots
         data = get_user_profile(member.id, guild.id)
         heimat = (data[0].strip() if data and data[0] else 'Unbekannt')
 
@@ -123,7 +109,27 @@ async def on_ready():
         await channel.send(message)
     
     print(f'Mitgliederliste wurde in den Kanal {channel.name} gesendet.')
-    print(f'Anzahl der Mitglieder: {guild.member_count}')
+
+@bot.event
+async def on_ready():
+    print(f'{bot.user} ist eingeloggt!')
+    
+    # Finde den Server (Guild)
+    guild = bot.get_guild(GUILD_ID)
+    
+    if not guild:
+        print(f'Server mit ID {GUILD_ID} wurde nicht gefunden.')
+        return
+    
+    # Finde den Kanal
+    channel = bot.get_channel(CHANNEL_ID)
+    
+    if not channel:
+        print(f'Kanal mit ID {CHANNEL_ID} wurde nicht gefunden.')
+        return
+    
+    # Poste die Mitgliederliste
+    await post_member_list(guild, channel)
 
 
 async def ask_user_questions(member, guild, welcome_channel):
@@ -188,6 +194,19 @@ async def ask_user_questions(member, guild, welcome_channel):
             f"**Tauschbereitschaft:** {tausch_bereitschaft}\n\n"
             "Du wurdest freigeschaltet und hast jetzt Zugriff auf alle Kanäle! Viel Spaß! ⚽"
         )
+        
+        # Aktualisiere die Mitgliederliste im #line-up Kanal
+        lineup_channel = bot.get_channel(CHANNEL_ID)
+        if lineup_channel:
+            try:
+                # Lösche alle Nachrichten im Kanal
+                await lineup_channel.purge(limit=100)
+                print(f'Nachrichten im Kanal {lineup_channel.name} gelöscht.')
+                
+                # Poste die aktualisierte Mitgliederliste
+                await post_member_list(guild, lineup_channel)
+            except Exception as e:
+                print(f'Fehler beim Aktualisieren der Mitgliederliste: {e}')
         
         return True
         
