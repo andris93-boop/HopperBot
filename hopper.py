@@ -110,26 +110,49 @@ def get_user_profile(user_id, guild_id):
     return result
 
 async def post_member_list(guild, channel):
-    """Postet die Mitgliederliste nach Heimatverein sortiert in den angegebenen Kanal."""
-    # Gruppiere Mitglieder nach Heimatverein (aus der DB, sonst 'Unbekannt')
-    clubs = {}
+    """Postet die Mitgliederliste nach Land und Heimatverein sortiert in den angegebenen Kanal."""
+    # Gruppiere Mitglieder nach Land und Verein
+    countries = {}  # Format: {land: {club_name: [members]}}
+    
     for member in guild.members:
         if member.bot:
             continue  # Überspringe Bots
         data = get_user_profile(member.id, guild.id)
-        heimat = (data[0].strip() if data and data[0] else 'Unbekannt')
+        
+        if data and data[0]:
+            club_name = data[0].strip()
+            country = data[1].strip() if data[1] else 'Unbekannt'
+        else:
+            club_name = 'Unbekannt'
+            country = 'Unbekannt'
 
         status_emoji = "🟢" if member.status == discord.Status.online else "⚪"
         entry = f"{status_emoji} {member.display_name} ({member.name})"
-        clubs.setdefault(heimat, []).append(entry)
+        
+        # Gruppiere nach Land und Club
+        if country not in countries:
+            countries[country] = {}
+        if club_name not in countries[country]:
+            countries[country][club_name] = []
+        countries[country][club_name].append(entry)
 
-    # Erstelle die Nachricht gruppiert nach Heimatverein
+    # Erstelle die Nachricht gruppiert nach Land und Heimatverein
     message = f"**Server: {guild.name}**\n"
     message += f"**Anzahl der Mitglieder: {guild.member_count}**\n\n"
-    for club in sorted(clubs.keys(), key=lambda s: (s == 'Unbekannt', s.lower())):
-        members = clubs[club]
-        message += f"**{club}** ({len(members)})\n"
-        message += "\n".join(members) + "\n\n"
+    
+    # Sortiere Länder ('Unbekannt' zuletzt)
+    sorted_countries = sorted(countries.keys(), key=lambda s: (s == 'Unbekannt', s.lower()))
+    
+    for country in sorted_countries:
+        message += f"═══ **{country}** ═══\n\n"
+        
+        # Sortiere Clubs innerhalb des Landes
+        sorted_clubs = sorted(countries[country].keys(), key=lambda s: (s == 'Unbekannt', s.lower()))
+        
+        for club in sorted_clubs:
+            members = countries[country][club]
+            message += f"**{club}** ({len(members)})\n"
+            message += "\n".join(members) + "\n\n"
     
     # Sende die Nachricht (aufgeteilt, falls zu lang)
     if len(message) > 2000:
