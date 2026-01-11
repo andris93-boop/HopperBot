@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord.ui import Select, View, Button, Modal, TextInput
 import os
 from dotenv import load_dotenv
 import sqlite3
@@ -108,6 +109,28 @@ def get_user_profile(user_id, guild_id):
     
     return result
 
+def get_clubs_by_country(country):
+    """Holt alle Vereine eines Landes aus der Datenbank."""
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT name FROM clubs WHERE country = ? ORDER BY name', (country,))
+    results = [row[0] for row in cursor.fetchall()]
+    
+    conn.close()
+    return results
+
+def get_all_countries():
+    """Holt alle Länder aus der Datenbank."""
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT DISTINCT country FROM clubs ORDER BY country')
+    results = [row[0] for row in cursor.fetchall()]
+    
+    conn.close()
+    return results
+
 async def post_member_list(guild, channel):
     """Postet die Mitgliederliste nach Land und Heimatverein sortiert in den angegebenen Kanal."""
     # Lösche alle Nachrichten im Kanal
@@ -193,53 +216,165 @@ async def on_ready():
 
 
 async def ask_user_questions(member, guild, welcome_channel):
-    """Stellt dem neuen Mitglied Fragen im Welcome-Kanal und speichert die Antworten."""
+    """Stellt dem neuen Mitglied Fragen mit Dropdown-Menüs und speichert die Antworten."""
     
-    def check(message):
-        return message.author == member and message.channel.id == WELCOME_CHANNEL_ID
+    user_data = {'country': None, 'club': None, 'tausch': None}
+    
+    # Modal für manuelle Eingabe (Land)
+    class CountryModal(Modal, title='Land eingeben'):
+        country_input = TextInput(label='Aus welchem Land kommt dein Verein?', placeholder='z.B. Deutschland')
+        
+        async def on_submit(self, interaction: discord.Interaction):
+            user_data['country'] = self.country_input.value
+            await interaction.response.defer()
+    
+    # Modal für manuelle Eingabe (Verein)
+    class ClubModal(Modal, title='Verein eingeben'):
+        club_input = TextInput(label='Wie heißt dein Verein?', placeholder='z.B. FC Bayern München')
+        
+        async def on_submit(self, interaction: discord.Interaction):
+            user_data['club'] = self.club_input.value
+            await interaction.response.defer()
+    
+    # Schritt 1: Land auswählen
+    class CountrySelect(Select):
+        def __init__(self):
+            # Hole existierende Länder aus der DB
+            existing_countries = get_all_countries()
+            # Füge häufige Länder hinzu, falls noch nicht vorhanden
+            default_countries = ['Deutschland', 'Österreich', 'Schweiz', 'England', 'Spanien', 'Italien', 'Frankreich']
+            all_countries = list(set(existing_countries + default_countries))
+            all_countries.sort()
+            
+            options = [discord.SelectOption(label=country, value=country) for country in all_countries[:25]]
+            super().__init__(placeholder='Wähle das Land deines Vereins...', options=options, min_values=1, max_values=1)
+        
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != member.id:
+                await interaction.response.send_message("Das ist nicht für dich!", ephemeral=True)
+                return
+            user_data['country'] = self.values[0]
+            await interaction.response.defer()
+            self.view.stop()
+    
+    class CountryView(View):
+        def __init__(self):
+            super().__init__(timeout=300)
+            self.add_item(CountrySelect())
+        
+        @discord.ui.button(label='✏️ Anderes Land', style=discord.ButtonStyle.secondary)
+        async def other_country(self, interaction: discord.Interaction, button: Button):
+            if interaction.user.id != member.id:
+                await interaction.response.send_message("Das ist nicht für dich!", ephemeral=True)
+                return
+            await interaction.response.send_modal(CountryModal())
+            await asyncio.sleep(1)  # Warte auf Modal-Submit
+            if user_data['country']:
+                self.stop()
+    
+    # Schritt 2: Verein auswählen
+    class ClubSelect(Select):
+        def __init__(self, country):
+            clubs = get_clubs_by_country(country)
+            
+            if len(clubs) == 0:
+                options = [discord.SelectOption(label='Keine Vereine vorhanden', value='none')]
+            else:
+                options = [discord.SelectOption(label=club, value=club) for club in clubs[:25]]
+            
+            super().__init__(placeholder='Wähle deinen Verein...', options=options, min_values=1, max_values=1)
+        
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != member.id:
+                await interaction.response.send_message("Das ist nicht für dich!", ephemeral=True)
+                return
+            if self.values[0] != 'none':
+                user_data['club'] = self.values[0]
+            await interaction.response.defer()
+            self.view.stop()
+    
+    class ClubView(View):
+        def __init__(self, country):
+            super().__init__(timeout=300)
+            clubs = get_clubs_by_country(country)
+            if clubs:
+                self.add_item(ClubSelect(country))
+        
+        @discord.ui.button(label='✏️ Anderer Verein', style=discord.ButtonStyle.secondary)
+        async def other_club(self, interaction: discord.Interaction, button: Button):
+            if interaction.user.id != member.id:
+                await interaction.response.send_message("Das ist nicht für dich!", ephemeral=True)
+                return
+            await interaction.response.send_modal(ClubModal())
+            await asyncio.sleep(1)  # Warte auf Modal-Submit
+            if user_data['club']:
+                self.stop()
+    
+    # Schritt 3: Tauschbereitschaft
+    class TauschSelect(Select):
+        def __init__(self):
+            options = [
+                discord.SelectOption(label='Ja', value='Ja', emoji='✅'),
+                discord.SelectOption(label='Nein', value='Nein', emoji='❌'),
+                discord.SelectOption(label='Vielleicht', value='Vielleicht', emoji='🤔')
+            ]
+            super().__init__(placeholder='Bist du tauschbereit?', options=options, min_values=1, max_values=1)
+        
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != member.id:
+                await interaction.response.send_message("Das ist nicht für dich!", ephemeral=True)
+                return
+            user_data['tausch'] = self.values[0]
+            await interaction.response.defer()
+            self.view.stop()
+    
+    class TauschView(View):
+        def __init__(self):
+            super().__init__(timeout=300)
+            self.add_item(TauschSelect())
     
     try:
-        # Sende die erste Frage im Welcome-Kanal
+        # Willkommensnachricht
         await welcome_channel.send(
             f"{member.mention}, willkommen auf dem Server **{guild.name}** ⚽\n\n"
-            "Bitte beantworte ein paar Fragen, damit wir dich besser kennenlernen können.\n\n"
-            "**Frage 1/3:** Was ist dein Heimatfußballverein?"
+            "Bitte beantworte ein paar Fragen, damit wir dich besser kennenlernen können."
         )
         
-        # Warte auf Antwort 1
-        try:
-            msg1 = await bot.wait_for('message', check=check, timeout=300.0)
-            heimatverein = msg1.content
-        except asyncio.TimeoutError:
+        # Frage 1: Land
+        country_view = CountryView()
+        await welcome_channel.send(f"{member.mention} **Frage 1/3:** Aus welchem Land kommt dein Verein?", view=country_view)
+        await country_view.wait()
+        
+        if not user_data['country']:
             await welcome_channel.send(f"{member.mention} ⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
             return False
         
-        # Frage 2
-        await welcome_channel.send(f"{member.mention} **Frage 2/4:** Aus welchem Land kommt dein Verein?")
-        try:
-            msg2 = await bot.wait_for('message', check=check, timeout=300.0)
-            land = msg2.content
-        except asyncio.TimeoutError:
+        # Frage 2: Verein
+        club_view = ClubView(user_data['country'])
+        await welcome_channel.send(f"{member.mention} **Frage 2/3:** Welcher Verein aus {user_data['country']}?", view=club_view)
+        await club_view.wait()
+        
+        if not user_data['club']:
             await welcome_channel.send(f"{member.mention} ⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
             return False
         
         # Erstelle oder finde den Verein in der Datenbank
-        club_id = get_or_create_club(heimatverein, land)
+        club_id = get_or_create_club(user_data['club'], user_data['country'])
         
-        # Frage 3
+        # Frage 3: Tauschbereitschaft
+        tausch_view = TauschView()
         await welcome_channel.send(
-            f"{member.mention} **Frage 3/3:** Bist du bereit, Devotionalien (Trikots, Schals, etc.) zu tauschen?\n"
-            "Antworte mit: **Ja**, **Nein** oder **Vielleicht**"
+            f"{member.mention} **Frage 3/3:** Bist du bereit, Devotionalien (Trikots, Schals, etc.) zu tauschen?",
+            view=tausch_view
         )
-        try:
-            msg3 = await bot.wait_for('message', check=check, timeout=300.0)
-            tausch_bereitschaft = msg3.content
-        except asyncio.TimeoutError:
+        await tausch_view.wait()
+        
+        if not user_data['tausch']:
             await welcome_channel.send(f"{member.mention} ⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
             return False
         
         # Speichere die Daten in der Datenbank
-        save_user_profile(member.id, guild.id, club_id, tausch_bereitschaft)
+        save_user_profile(member.id, guild.id, club_id, user_data['tausch'])
         
         # Entferne die Newcomer-Rolle für automatische Freischaltung
         role = guild.get_role(NEWCOMER_ROLE_ID)
@@ -252,8 +387,8 @@ async def ask_user_questions(member, guild, welcome_channel):
         
         await welcome_channel.send(
             f"{member.mention} ✅ Vielen Dank! Deine Angaben wurden gespeichert.\n\n"
-            f"**Heimatverein:** {heimatverein} ({land})\n"
-            f"**Tauschbereitschaft:** {tausch_bereitschaft}\n\n"
+            f"**Heimatverein:** {user_data['club']} ({user_data['country']})\n"
+            f"**Tauschbereitschaft:** {user_data['tausch']}\n\n"
             "Du wurdest freigeschaltet und hast jetzt Zugriff auf alle Kanäle! Viel Spaß! ⚽"
         )
         
