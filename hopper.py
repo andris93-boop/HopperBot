@@ -12,11 +12,12 @@ load_dotenv()
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
 GUILD_ID = int(os.getenv('GUILD_ID'))
-CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
+LINE_UP_CHANNEL_ID = int(os.getenv('LINE_UP_CHANNEL_ID'))
 # Channel and role IDs for on-join behavior
 WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID'))
 NEWCOMER_ROLE_ID = int(os.getenv('NEWCOMER_ROLE_ID'))
 SET_CLUB_CHANNEL_ID = int(os.getenv('SET_CLUB_CHANNEL_ID'))
+GROUNDHOPPER_ROLE_ID = int(os.getenv('GROUNDHOPPER_ROLE_ID'))
 
 # Create bot with intents
 intents = discord.Intents.default()
@@ -213,71 +214,14 @@ async def on_ready():
         return
     
     # Find the channel
-    channel = bot.get_channel(CHANNEL_ID)
+    channel = bot.get_channel(LINE_UP_CHANNEL_ID)
     
     if not channel:
-        print(f'Channel with ID {CHANNEL_ID} not found.')
+        print(f'Channel with ID {LINE_UP_CHANNEL_ID} not found.')
         return
     
     # Post the member list
     await post_member_list(guild, channel)
-
-
-async def ask_user_questions(member, guild, welcome_channel):
-    """Asks the new member to use /set-club command."""
-    
-    try:
-        # Welcome message with instructions to use slash command
-        await welcome_channel.send(
-            f"{member.mention}, welcome to the server **{guild.name}** ⚽\n\n"
-            f"Please use the `/set-club` command to set up your profile!\n\n"
-            f"Type `/set-club` and fill in:\n"
-            f"• **country** - Your club's country (with autocomplete)\n"
-            f"• **club** - Your home club name (with autocomplete)\n"
-            f"• **willingness_to_trade** - Whether you want to trade memorabilia\n\n"
-            f"After completing your profile, you'll get access to all channels!"
-        )
-        
-        # Wait for profile creation (check every 5 seconds for up to 5 minutes)
-        for _ in range(60):
-            await asyncio.sleep(5)
-            profile = get_user_profile(member.id, guild.id)
-            if profile:
-                # Profile created, remove newcomer role
-                role = guild.get_role(NEWCOMER_ROLE_ID)
-                if role and role in member.roles:
-                    try:
-                        await member.remove_roles(role, reason='Profile completed')
-                        print(f'Newcomer role removed from {member.name} - profile completed')
-                    except Exception as e:
-                        print(f'Error removing role: {e}')
-                
-                club_name, club_country = profile[0], profile[1]
-                await welcome_channel.send(
-                    f"{member.mention} ✅ Welcome! Your profile is complete.\n\n"
-                    f"**Home club:** {club_name} ({club_country})\n\n"
-                    "You now have access to all channels! Have fun! ⚽"
-                )
-                
-                # Update member list
-                lineup_channel = bot.get_channel(CHANNEL_ID)
-                if lineup_channel:
-                    try:
-                        await post_member_list(guild, lineup_channel)
-                    except Exception as e:
-                        print(f'Error updating member list: {e}')
-                
-                return True
-        
-        # Timeout - remind user
-        await welcome_channel.send(
-            f"{member.mention} ⏱️ Don't forget to complete your profile with `/set-club`!"
-        )
-        
-    except Exception as e:
-        print(f"Error asking questions: {e}")
-        await welcome_channel.send(f"{member.mention} There was an error. Please contact an admin.")
-        return False
 
 @bot.event
 async def on_member_join(member):
@@ -306,6 +250,7 @@ async def on_member_join(member):
     welcome_channel = None
     for channel in guild.channels:
         try:
+            #if channel.id == WELCOME_CHANNEL_ID or channel.id == SET_CLUB_CHANNEL_ID:
             if channel.id == WELCOME_CHANNEL_ID:
                 welcome_channel = channel
                 # Allow visibility and messages in welcome channel
@@ -318,9 +263,8 @@ async def on_member_join(member):
     
     # Ask questions in the welcome channel
     if welcome_channel:
-        success = await ask_user_questions(member, guild, welcome_channel)
-        if success:
-            print(f'Profile for {member.name} successfully saved.')
+        await welcome_channel.send(f"👋 Welcome {member.mention} to **{guild.name}**! Please use the `/set-club` command to set your home club.")
+
     else:
         print(f'Welcome channel with ID {WELCOME_CHANNEL_ID} not found.')
 
@@ -332,7 +276,7 @@ async def on_message(message):
         return
     
     # Check if message is in set-club channel
-    if message.channel.id == SET_CLUB_CHANNEL_ID:
+    if message.channel.id == SET_CLUB_CHANNEL_ID or message.channel.id == WELCOME_CHANNEL_ID:
         # Delete user message to keep channel clean
         try:
             await message.delete()
@@ -440,8 +384,19 @@ async def set_club_command(
         ephemeral=True
     )
     
+    # Remove user from newcomer role if they have it
+    role = guild.get_role(NEWCOMER_ROLE_ID)
+    groundhopper_role = guild.get_role(GROUNDHOPPER_ROLE_ID)
+    if role in member.roles:
+        try:
+            await member.remove_roles(role, reason='User set club, removing newcomer role')
+            print(f'Removed newcomer role from {member}')
+            await member.add_roles(groundhopper_role, reason='User set club, removing newcomer role')
+        except Exception as e:
+            print(f'Error removing newcomer role from {member}: {e}')
+
     # Update member list
-    lineup_channel = bot.get_channel(CHANNEL_ID)
+    lineup_channel = bot.get_channel(LINE_UP_CHANNEL_ID)
     if lineup_channel:
         try:
             await post_member_list(guild, lineup_channel)
