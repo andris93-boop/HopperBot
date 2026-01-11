@@ -1,10 +1,10 @@
 import discord
 from discord.ext import commands
-from discord.ui import Select, View, Button, Modal, TextInput
 import os
 from dotenv import load_dotenv
 import sqlite3
 import asyncio
+from club_selection import get_country_and_club_ui, get_trade_willingness_ui
 
 # Load environment variables from .env file
 load_dotenv()
@@ -16,6 +16,7 @@ CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 # Channel and role IDs for on-join behavior
 WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID'))
 NEWCOMER_ROLE_ID = int(os.getenv('NEWCOMER_ROLE_ID'))
+SET_CLUB_CHANNEL_ID = int(os.getenv('SET_CLUB_CHANNEL_ID'))
 
 # Create bot with intents
 intents = discord.Intents.default()
@@ -220,118 +221,11 @@ async def ask_user_questions(member, guild, welcome_channel):
     
     user_data = {'country': None, 'club': None, 'trade': None}
     
-    # Modal for manual input (country)
-    class CountryModal(Modal, title='Enter country'):
-        country_input = TextInput(label='Which country is your club from?', placeholder='e.g. Germany')
-        
-        async def on_submit(self, interaction: discord.Interaction):
-            user_data['country'] = self.country_input.value
-            await interaction.response.defer()
-    
-    # Modal for manual input (club)
-    class ClubModal(Modal, title='Enter club'):
-        club_input = TextInput(label='What is your club called?', placeholder='e.g. FC Bayern Munich')
-        
-        async def on_submit(self, interaction: discord.Interaction):
-            user_data['club'] = self.club_input.value
-            await interaction.response.defer()
-    
-    # Step 1: Select country
-    class CountrySelect(Select):
-        def __init__(self):
-            # Get existing countries from DB
-            existing_countries = get_all_countries()
-            # Add common countries if not already present
-            default_countries = ['Germany', 'Austria', 'Switzerland', 'England', 'Spain', 'Italy', 'France']
-            all_countries = list(set(existing_countries + default_countries))
-            all_countries.sort()
-            
-            options = [discord.SelectOption(label=country, value=country) for country in all_countries[:25]]
-            super().__init__(placeholder='Choose your club\'s country...', options=options, min_values=1, max_values=1)
-        
-        async def callback(self, interaction: discord.Interaction):
-            if interaction.user.id != member.id:
-                await interaction.response.send_message("This is not for you!", ephemeral=True)
-                return
-            user_data['country'] = self.values[0]
-            await interaction.response.defer()
-            self.view.stop()
-    
-    class CountryView(View):
-        def __init__(self):
-            super().__init__(timeout=300)
-            self.add_item(CountrySelect())
-        
-        @discord.ui.button(label='✏️ Other country', style=discord.ButtonStyle.secondary)
-        async def other_country(self, interaction: discord.Interaction, button: Button):
-            if interaction.user.id != member.id:
-                await interaction.response.send_message("This is not for you!", ephemeral=True)
-                return
-            await interaction.response.send_modal(CountryModal())
-            await asyncio.sleep(1)  # Wait for modal submit
-            if user_data['country']:
-                self.stop()
-    
-    # Step 2: Select club
-    class ClubSelect(Select):
-        def __init__(self, country):
-            clubs = get_clubs_by_country(country)
-            
-            if len(clubs) == 0:
-                options = [discord.SelectOption(label='No clubs available', value='none')]
-            else:
-                options = [discord.SelectOption(label=club, value=club) for club in clubs[:25]]
-            
-            super().__init__(placeholder='Choose your club...', options=options, min_values=1, max_values=1)
-        
-        async def callback(self, interaction: discord.Interaction):
-            if interaction.user.id != member.id:
-                await interaction.response.send_message("This is not for you!", ephemeral=True)
-                return
-            if self.values[0] != 'none':
-                user_data['club'] = self.values[0]
-            await interaction.response.defer()
-            self.view.stop()
-    
-    class ClubView(View):
-        def __init__(self, country):
-            super().__init__(timeout=300)
-            clubs = get_clubs_by_country(country)
-            if clubs:
-                self.add_item(ClubSelect(country))
-        
-        @discord.ui.button(label='✏️ Other club', style=discord.ButtonStyle.secondary)
-        async def other_club(self, interaction: discord.Interaction, button: Button):
-            if interaction.user.id != member.id:
-                await interaction.response.send_message("This is not for you!", ephemeral=True)
-                return
-            await interaction.response.send_modal(ClubModal())
-            await asyncio.sleep(1)  # Wait for modal submit
-            if user_data['club']:
-                self.stop()
-    
-    # Step 3: Willingness to trade
-    class TradeSelect(Select):
-        def __init__(self):
-            options = [
-                discord.SelectOption(label='Yes', value='Yes', emoji='✅'),
-                discord.SelectOption(label='No', value='No', emoji='❌'),
-                discord.SelectOption(label='Maybe', value='Maybe', emoji='🤔')
-            ]
-            super().__init__(placeholder='Are you willing to trade?', options=options, min_values=1, max_values=1)
-        
-        async def callback(self, interaction: discord.Interaction):
-            if interaction.user.id != member.id:
-                await interaction.response.send_message("This is not for you!", ephemeral=True)
-                return
-            user_data['trade'] = self.values[0]
-            await interaction.response.defer()
-            self.view.stop()
-    
-    class TradeView(View):
-        def __init__(self):
-            super().__init__(timeout=300)
-            self.add_item(TradeSelect())
+    # Get UI components from module
+    CountryView, ClubView = get_country_and_club_ui(
+        member, user_data, get_all_countries, get_clubs_by_country, get_or_create_club
+    )
+    TradeView = get_trade_willingness_ui(member, user_data)
     
     try:
         # Welcome message
@@ -452,6 +346,78 @@ async def on_member_join(member):
             print(f'Profile for {member.name} successfully saved.')
     else:
         print(f'Welcome channel with ID {WELCOME_CHANNEL_ID} not found.')
+
+@bot.event
+async def on_message(message):
+    """Handle messages in the set-club channel."""
+    # Ignore bot messages
+    if message.author.bot:
+        return
+    
+    # Check if message is in set-club channel
+    if message.channel.id == SET_CLUB_CHANNEL_ID:
+        member = message.author
+        guild = message.guild
+        
+        user_data = {'country': None, 'club': None}
+        
+        # Get UI components from module
+        CountryView, ClubView = get_country_and_club_ui(
+            member, user_data, get_all_countries, get_clubs_by_country, get_or_create_club
+        )
+        
+        try:
+            # Delete the user's message
+            await message.delete()
+            
+            # Question 1: Country
+            country_view = CountryView()
+            await message.channel.send(f"{member.mention} **Step 1/2:** Which country is your club from?", view=country_view)
+            await country_view.wait()
+            
+            if not user_data['country']:
+                await message.channel.send(f"{member.mention} ⏱️ Time expired.")
+                return
+            
+            # Question 2: Club
+            club_view = ClubView(user_data['country'])
+            await message.channel.send(f"{member.mention} **Step 2/2:** Which club from {user_data['country']}?", view=club_view)
+            await club_view.wait()
+            
+            if not user_data['club']:
+                await message.channel.send(f"{member.mention} ⏱️ Time expired.")
+                return
+            
+            # Create or find the club in the database
+            club_id = get_or_create_club(user_data['club'], user_data['country'])
+            
+            # Get current profile to preserve trade willingness
+            current_profile = get_user_profile(member.id, guild.id)
+            willingness_to_trade = current_profile[2] if current_profile else 'Unknown'
+            
+            # Update profile with new club
+            save_user_profile(member.id, guild.id, club_id, willingness_to_trade)
+            
+            await message.channel.send(
+                f"{member.mention} ✅ Your club has been updated!\n\n"
+                f"**Home club:** {user_data['club']} ({user_data['country']})")
+            
+            # Update member list
+            lineup_channel = bot.get_channel(CHANNEL_ID)
+            if lineup_channel:
+                try:
+                    await post_member_list(guild, lineup_channel)
+                except Exception as e:
+                    print(f'Error updating member list: {e}')
+                    
+        except Exception as e:
+            print(f"Error in set-club channel: {e}")
+            await message.channel.send(f"{member.mention} There was an error. Please try again.")
+        
+        return
+    
+    # Process commands
+    await bot.process_commands(message)
 
 @bot.command(name='profile')
 async def show_profile(ctx, member: discord.Member = None):
