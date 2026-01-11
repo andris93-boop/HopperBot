@@ -24,19 +24,30 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Datenbank initialisieren
 def init_database():
-    """Erstellt die SQLite-Datenbank und die Tabelle für Nutzerprofile."""
+    """Erstellt die SQLite-Datenbank und die Tabellen für Nutzerprofile und Vereine."""
     conn = sqlite3.connect('hopper_bot.db')
     cursor = conn.cursor()
     
+    # Tabelle für Vereine
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS clubs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            country TEXT NOT NULL
+        )
+    ''')
+    
+    # Tabelle für Nutzerprofile
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_profiles (
             user_id INTEGER,
             guild_id INTEGER,
-            heimatverein TEXT,
+            club_id INTEGER,
             wohnort TEXT,
             tausch_bereitschaft TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (user_id, guild_id)
+            PRIMARY KEY (user_id, guild_id),
+            FOREIGN KEY (club_id) REFERENCES clubs(id)
         )
     ''')
     
@@ -47,16 +58,36 @@ def init_database():
 # Datenbank beim Start initialisieren
 init_database()
 
-def save_user_profile(user_id, guild_id, heimatverein, wohnort, tausch_bereitschaft):
+def get_or_create_club(name, country):
+    """Findet einen Verein oder erstellt ihn, falls er noch nicht existiert."""
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+    
+    # Prüfe, ob der Verein bereits existiert
+    cursor.execute('SELECT id FROM clubs WHERE name = ?', (name,))
+    result = cursor.fetchone()
+    
+    if result:
+        club_id = result[0]
+    else:
+        # Erstelle neuen Verein
+        cursor.execute('INSERT INTO clubs (name, country) VALUES (?, ?)', (name, country))
+        club_id = cursor.lastrowid
+        conn.commit()
+    
+    conn.close()
+    return club_id
+
+def save_user_profile(user_id, guild_id, club_id, wohnort, tausch_bereitschaft):
     """Speichert das Nutzerprofil in der Datenbank."""
     conn = sqlite3.connect('hopper_bot.db')
     cursor = conn.cursor()
     
     cursor.execute('''
         INSERT OR REPLACE INTO user_profiles 
-        (user_id, guild_id, heimatverein, wohnort, tausch_bereitschaft)
+        (user_id, guild_id, club_id, wohnort, tausch_bereitschaft)
         VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, guild_id, heimatverein, wohnort, tausch_bereitschaft))
+    ''', (user_id, guild_id, club_id, wohnort, tausch_bereitschaft))
     
     conn.commit()
     conn.close()
@@ -67,9 +98,10 @@ def get_user_profile(user_id, guild_id):
     cursor = conn.cursor()
     
     cursor.execute('''
-        SELECT heimatverein, wohnort, tausch_bereitschaft, created_at
-        FROM user_profiles
-        WHERE user_id = ? AND guild_id = ?
+        SELECT c.name, c.country, up.wohnort, up.tausch_bereitschaft, up.created_at
+        FROM user_profiles up
+        LEFT JOIN clubs c ON up.club_id = c.id
+        WHERE up.user_id = ? AND up.guild_id = ?
     ''', (user_id, guild_id))
     
     result = cursor.fetchone()
@@ -155,28 +187,40 @@ async def ask_user_questions(member, guild, welcome_channel):
             return False
         
         # Frage 2
-        await welcome_channel.send(f"{member.mention} **Frage 2/3:** Wo wohnst du? (Stadt/Region)")
+        await welcome_channel.send(f"{member.mention} **Frage 2/4:** Aus welchem Land kommt dein Verein?")
         try:
             msg2 = await bot.wait_for('message', check=check, timeout=300.0)
-            wohnort = msg2.content
+            land = msg2.content
         except asyncio.TimeoutError:
             await welcome_channel.send(f"{member.mention} ⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
             return False
         
+        # Erstelle oder finde den Verein in der Datenbank
+        club_id = get_or_create_club(heimatverein, land)
+        
         # Frage 3
+        await welcome_channel.send(f"{member.mention} **Frage 3/4:** Wo wohnst du? (Stadt/Region)")
+        try:
+            msg3 = await bot.wait_for('message', check=check, timeout=300.0)
+            wohnort = msg3.content
+        except asyncio.TimeoutError:
+            await welcome_channel.send(f"{member.mention} ⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
+            return False
+        
+        # Frage 4
         await welcome_channel.send(
-            f"{member.mention} **Frage 3/3:** Bist du bereit, Devotionalien (Trikots, Schals, etc.) zu tauschen?\n"
+            f"{member.mention} **Frage 4/4:** Bist du bereit, Devotionalien (Trikots, Schals, etc.) zu tauschen?\n"
             "Antworte mit: **Ja**, **Nein** oder **Vielleicht**"
         )
         try:
-            msg3 = await bot.wait_for('message', check=check, timeout=300.0)
-            tausch_bereitschaft = msg3.content
+            msg4 = await bot.wait_for('message', check=check, timeout=300.0)
+            tausch_bereitschaft = msg4.content
         except asyncio.TimeoutError:
             await welcome_channel.send(f"{member.mention} ⏱️ Zeit abgelaufen. Bitte kontaktiere einen Admin.")
             return False
         
         # Speichere die Daten in der Datenbank
-        save_user_profile(member.id, guild.id, heimatverein, wohnort, tausch_bereitschaft)
+        save_user_profile(member.id, guild.id, club_id, wohnort, tausch_bereitschaft)
         
         # Entferne die Newcomer-Rolle für automatische Freischaltung
         role = guild.get_role(NEWCOMER_ROLE_ID)
@@ -189,7 +233,7 @@ async def ask_user_questions(member, guild, welcome_channel):
         
         await welcome_channel.send(
             f"{member.mention} ✅ Vielen Dank! Deine Angaben wurden gespeichert.\n\n"
-            f"**Heimatverein:** {heimatverein}\n"
+            f"**Heimatverein:** {heimatverein} ({land})\n"
             f"**Wohnort:** {wohnort}\n"
             f"**Tauschbereitschaft:** {tausch_bereitschaft}\n\n"
             "Du wurdest freigeschaltet und hast jetzt Zugriff auf alle Kanäle! Viel Spaß! ⚽"
@@ -269,9 +313,9 @@ async def show_profile(ctx, member: discord.Member = None):
     profile = get_user_profile(member.id, ctx.guild.id)
     
     if profile:
-        heimatverein, wohnort, tausch_bereitschaft, created_at = profile
+        club_name, club_country, wohnort, tausch_bereitschaft, created_at = profile
         embed = discord.Embed(title=f"Profil von {member.display_name}", color=discord.Color.blue())
-        embed.add_field(name="⚽ Heimatverein", value=heimatverein, inline=False)
+        embed.add_field(name="⚽ Heimatverein", value=f"{club_name} ({club_country})", inline=False)
         embed.add_field(name="📍 Wohnort", value=wohnort, inline=False)
         embed.add_field(name="🔄 Tauschbereitschaft", value=tausch_bereitschaft, inline=False)
         embed.set_footer(text=f"Erstellt am: {created_at}")
