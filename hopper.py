@@ -1,10 +1,10 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 import os
 from dotenv import load_dotenv
 import sqlite3
 import asyncio
-from club_selection import get_country_and_club_ui, get_trade_willingness_ui
 
 # Load environment variables from .env file
 load_dotenv()
@@ -198,6 +198,13 @@ async def post_member_list(guild, channel):
 async def on_ready():
     print(f'{bot.user} is logged in!')
     
+    # Sync slash commands
+    try:
+        synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+        print(f'Synced {len(synced)} command(s) to guild {GUILD_ID}')
+    except Exception as e:
+        print(f'Failed to sync commands: {e}')
+    
     # Find the server (guild)
     guild = bot.get_guild(GUILD_ID)
     
@@ -217,85 +224,55 @@ async def on_ready():
 
 
 async def ask_user_questions(member, guild, welcome_channel):
-    """Asks the new member questions with dropdown menus and saves the answers."""
-    
-    user_data = {'country': None, 'club': None, 'trade': None}
-    
-    # Get UI components from module
-    CountryView, ClubView = get_country_and_club_ui(
-        member, user_data, get_all_countries, get_clubs_by_country, get_or_create_club
-    )
-    TradeView = get_trade_willingness_ui(member, user_data)
+    """Asks the new member to use /set-club command."""
     
     try:
-        # Welcome message
+        # Welcome message with instructions to use slash command
         await welcome_channel.send(
             f"{member.mention}, welcome to the server **{guild.name}** ⚽\n\n"
-            "Please answer a few questions so we can get to know you better."
+            f"Please use the `/set-club` command to set up your profile!\n\n"
+            f"Type `/set-club` and fill in:\n"
+            f"• **country** - Your club's country (with autocomplete)\n"
+            f"• **club** - Your home club name (with autocomplete)\n"
+            f"• **willingness_to_trade** - Whether you want to trade memorabilia\n\n"
+            f"After completing your profile, you'll get access to all channels!"
         )
         
-        # Question 1: Country
-        country_view = CountryView()
-        await welcome_channel.send(f"{member.mention} **Question 1/3:** Which country is your club from?", view=country_view)
-        await country_view.wait()
+        # Wait for profile creation (check every 5 seconds for up to 5 minutes)
+        for _ in range(60):
+            await asyncio.sleep(5)
+            profile = get_user_profile(member.id, guild.id)
+            if profile:
+                # Profile created, remove newcomer role
+                role = guild.get_role(NEWCOMER_ROLE_ID)
+                if role and role in member.roles:
+                    try:
+                        await member.remove_roles(role, reason='Profile completed')
+                        print(f'Newcomer role removed from {member.name} - profile completed')
+                    except Exception as e:
+                        print(f'Error removing role: {e}')
+                
+                club_name, club_country = profile[0], profile[1]
+                await welcome_channel.send(
+                    f"{member.mention} ✅ Welcome! Your profile is complete.\n\n"
+                    f"**Home club:** {club_name} ({club_country})\n\n"
+                    "You now have access to all channels! Have fun! ⚽"
+                )
+                
+                # Update member list
+                lineup_channel = bot.get_channel(CHANNEL_ID)
+                if lineup_channel:
+                    try:
+                        await post_member_list(guild, lineup_channel)
+                    except Exception as e:
+                        print(f'Error updating member list: {e}')
+                
+                return True
         
-        if not user_data['country']:
-            await welcome_channel.send(f"{member.mention} ⏱️ Time expired. Please contact an admin.")
-            return False
-        
-        # Question 2: Club
-        club_view = ClubView(user_data['country'])
-        await welcome_channel.send(f"{member.mention} **Question 2/3:** Which club from {user_data['country']}?", view=club_view)
-        await club_view.wait()
-        
-        if not user_data['club']:
-            await welcome_channel.send(f"{member.mention} ⏱️ Time expired. Please contact an admin.")
-            return False
-        
-        # Create or find the club in the database
-        club_id = get_or_create_club(user_data['club'], user_data['country'])
-        
-        # Question 3: Willingness to trade
-        trade_view = TradeView()
+        # Timeout - remind user
         await welcome_channel.send(
-            f"{member.mention} **Question 3/3:** Are you willing to trade memorabilia (jerseys, scarves, etc.)?",
-            view=trade_view
+            f"{member.mention} ⏱️ Don't forget to complete your profile with `/set-club`!"
         )
-        await trade_view.wait()
-        
-        if not user_data['trade']:
-            await welcome_channel.send(f"{member.mention} ⏱️ Time expired. Please contact an admin.")
-            return False
-        
-        # Save data to database
-        save_user_profile(member.id, guild.id, club_id, user_data['trade'])
-        
-        # Remove newcomer role for automatic unlock
-        role = guild.get_role(NEWCOMER_ROLE_ID)
-        if role and role in member.roles:
-            try:
-                await member.remove_roles(role, reason='Onboarding completed')
-                print(f'Newcomer role removed from {member.name} - automatically unlocked')
-            except Exception as e:
-                print(f'Error removing role: {e}')
-        
-        await welcome_channel.send(
-            f"{member.mention} ✅ Thank you! Your information has been saved.\n\n"
-            f"**Home club:** {user_data['club']} ({user_data['country']})\n"
-            f"**Willingness to trade:** {user_data['trade']}\n\n"
-            "You have been unlocked and now have access to all channels! Have fun! ⚽"
-        )
-        
-        # Update member list in #line-up channel
-        lineup_channel = bot.get_channel(CHANNEL_ID)
-        if lineup_channel:
-            try:
-                # Post updated member list (deletion happens in post_member_list)
-                await post_member_list(guild, lineup_channel)
-            except Exception as e:
-                print(f'Error updating member list: {e}')
-        
-        return True
         
     except Exception as e:
         print(f"Error asking questions: {e}")
@@ -356,68 +333,140 @@ async def on_message(message):
     
     # Check if message is in set-club channel
     if message.channel.id == SET_CLUB_CHANNEL_ID:
-        member = message.author
-        guild = message.guild
+        # Delete user message to keep channel clean
+        try:
+            await message.delete()
+        except:
+            pass
         
-        user_data = {'country': None, 'club': None}
-        
-        # Get UI components from module
-        CountryView, ClubView = get_country_and_club_ui(
-            member, user_data, get_all_countries, get_clubs_by_country, get_or_create_club
+        # Remind user to use slash command
+        reminder = await message.channel.send(
+            f"{message.author.mention} Please use the `/set-club` command to update your profile!"
         )
         
+        # Delete reminder after 10 seconds
+        await asyncio.sleep(10)
         try:
-            # Delete the user's message
-            await message.delete()
-            
-            # Question 1: Country
-            country_view = CountryView()
-            await message.channel.send(f"{member.mention} **Step 1/2:** Which country is your club from?", view=country_view)
-            await country_view.wait()
-            
-            if not user_data['country']:
-                await message.channel.send(f"{member.mention} ⏱️ Time expired.")
-                return
-            
-            # Question 2: Club
-            club_view = ClubView(user_data['country'])
-            await message.channel.send(f"{member.mention} **Step 2/2:** Which club from {user_data['country']}?", view=club_view)
-            await club_view.wait()
-            
-            if not user_data['club']:
-                await message.channel.send(f"{member.mention} ⏱️ Time expired.")
-                return
-            
-            # Create or find the club in the database
-            club_id = get_or_create_club(user_data['club'], user_data['country'])
-            
-            # Get current profile to preserve trade willingness
-            current_profile = get_user_profile(member.id, guild.id)
-            willingness_to_trade = current_profile[2] if current_profile else 'Unknown'
-            
-            # Update profile with new club
-            save_user_profile(member.id, guild.id, club_id, willingness_to_trade)
-            
-            await message.channel.send(
-                f"{member.mention} ✅ Your club has been updated!\n\n"
-                f"**Home club:** {user_data['club']} ({user_data['country']})")
-            
-            # Update member list
-            lineup_channel = bot.get_channel(CHANNEL_ID)
-            if lineup_channel:
-                try:
-                    await post_member_list(guild, lineup_channel)
-                except Exception as e:
-                    print(f'Error updating member list: {e}')
-                    
-        except Exception as e:
-            print(f"Error in set-club channel: {e}")
-            await message.channel.send(f"{member.mention} There was an error. Please try again.")
+            await reminder.delete()
+        except:
+            pass
         
         return
     
     # Process commands
     await bot.process_commands(message)
+
+# Autocomplete functions
+async def country_autocomplete(interaction: discord.Interaction, current: str):
+    """Autocomplete for country selection."""
+    countries = get_all_countries()
+    # Add common countries
+    default_countries = ['Germany', 'Austria', 'Switzerland', 'England', 'Spain', 'Italy', 'France', 'Netherlands', 'Portugal', 'Belgium']
+    all_countries = list(set(countries + default_countries))
+    all_countries.sort()
+    
+    # Filter based on current input
+    if current:
+        filtered = [c for c in all_countries if current.lower() in c.lower()]
+    else:
+        filtered = all_countries
+    
+    return [app_commands.Choice(name=country, value=country) for country in filtered[:25]]
+
+async def club_autocomplete(interaction: discord.Interaction, current: str):
+    """Autocomplete for club selection."""
+    # Get country from namespace (already selected parameter)
+    country = interaction.namespace.country if hasattr(interaction.namespace, 'country') else None
+    
+    if not country:
+        return []
+    
+    clubs = get_clubs_by_country(country)
+    
+    # Filter based on current input
+    if current:
+        filtered = [c for c in clubs if current.lower() in c.lower()]
+    else:
+        filtered = clubs
+    
+    return [app_commands.Choice(name=club, value=club) for club in filtered[:25]]
+
+# Slash command: /set-club
+@bot.tree.command(name="set-club", description="Set or update your home club", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(
+    country="The country your club is from",
+    club="Your home club name",
+    willingness_to_trade="Are you willing to trade memorabilia?"
+)
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
+@app_commands.choices(willingness_to_trade=[
+    app_commands.Choice(name="Yes", value="Yes"),
+    app_commands.Choice(name="No", value="No"),
+    app_commands.Choice(name="Maybe", value="Maybe")
+])
+async def set_club_command(
+    interaction: discord.Interaction,
+    country: str,
+    club: str,
+    willingness_to_trade: app_commands.Choice[str] = None
+):
+    """Slash command to set or update user's club."""
+    await interaction.response.defer(ephemeral=True)
+    
+    member = interaction.user
+    guild = interaction.guild
+    
+    # Create or find the club in the database
+    club_id = get_or_create_club(club, country)
+    
+    # Get current profile to check if updating or creating
+    current_profile = get_user_profile(member.id, guild.id)
+    
+    # Determine willingness to trade
+    if willingness_to_trade:
+        trade_value = willingness_to_trade.value
+    elif current_profile:
+        trade_value = current_profile[2]  # Keep existing value
+    else:
+        trade_value = 'Unknown'
+    
+    # Save profile
+    save_user_profile(member.id, guild.id, club_id, trade_value)
+    
+    await interaction.followup.send(
+        f"✅ Your club has been updated!\n\n"
+        f"**Home club:** {club} ({country})\n"
+        f"**Willingness to trade:** {trade_value}",
+        ephemeral=True
+    )
+    
+    # Update member list
+    lineup_channel = bot.get_channel(CHANNEL_ID)
+    if lineup_channel:
+        try:
+            await post_member_list(guild, lineup_channel)
+        except Exception as e:
+            print(f'Error updating member list: {e}')
+
+# Slash command: /profile
+@bot.tree.command(name="profile", description="Show a user's profile", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(member="The member to show profile for (leave empty for yourself)")
+async def profile_command(interaction: discord.Interaction, member: discord.Member = None):
+    """Shows a user's profile."""
+    if member is None:
+        member = interaction.user
+    
+    profile = get_user_profile(member.id, interaction.guild.id)
+    
+    if profile:
+        club_name, club_country, willingness_to_trade, created_at = profile
+        embed = discord.Embed(title=f"Profile of {member.display_name}", color=discord.Color.blue())
+        embed.add_field(name="⚽ Home club", value=f"{club_name} ({club_country})", inline=False)
+        embed.add_field(name="🔄 Willingness to trade", value=willingness_to_trade, inline=False)
+        embed.set_footer(text=f"Created on: {created_at}")
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(f"No profile found for {member.display_name}.", ephemeral=True)
 
 @bot.command(name='profile')
 async def show_profile(ctx, member: discord.Member = None):
