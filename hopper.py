@@ -17,6 +17,8 @@ LINE_UP_CHANNEL_ID = int(os.getenv('LINE_UP_CHANNEL_ID'))
 WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID'))
 NEWCOMER_ROLE_ID = int(os.getenv('NEWCOMER_ROLE_ID'))
 SET_CLUB_CHANNEL_ID = int(os.getenv('SET_CLUB_CHANNEL_ID'))
+LINE_UP_CHANNEL_ID = int(os.getenv('LINE_UP_CHANNEL_ID', 0))
+GROUNDHELP_CHANNEL_ID = int(os.getenv('GROUNDHELP_CHANNEL_ID', 0))
 GROUNDHOPPER_ROLE_ID = int(os.getenv('GROUNDHOPPER_ROLE_ID'))
 
 # Create bot with intents
@@ -274,8 +276,66 @@ async def on_message(message):
     # Ignore bot messages
     if message.author.bot:
         return
-    
-    # Check if message is in set-club channel
+    # Groundhelp channel: detect !ClubName and notify matching members
+    if message.channel.id == GROUNDHELP_CHANNEL_ID:
+        try:
+            content = message.content
+            import re
+            matches = re.findall(r'!([^!\n?.!,;:]+)', content)
+            if matches:
+                guild = message.guild
+                notified = []
+                conn = sqlite3.connect('hopper_bot.db')
+                cursor = conn.cursor()
+                for raw in matches:
+                    query = raw.strip()
+                    if not query:
+                        continue
+
+                    # exact match (case-insensitive)
+                    cursor.execute('SELECT id, name FROM clubs WHERE LOWER(name) = LOWER(?)', (query,))
+                    rows = cursor.fetchall()
+                    if not rows:
+                        cursor.execute('SELECT id, name FROM clubs WHERE LOWER(name) LIKE LOWER(?)', (f'%{query}%',))
+                        rows = cursor.fetchall()
+
+                    if not rows:
+                        continue
+
+                    club_ids = [r[0] for r in rows]
+                    # fetch user_ids for these clubs in this guild
+                    placeholders = ','.join('?' for _ in club_ids)
+                    params = (*club_ids, guild.id)
+                    cursor.execute(f'SELECT user_id FROM user_profiles WHERE club_id IN ({placeholders}) AND guild_id = ?', params)
+                    for (uid,) in cursor.fetchall():
+                        member = guild.get_member(uid)
+                        if member:
+                            notified.append(member)
+
+                conn.close()
+
+                # uniq
+                unique = []
+                seen = set()
+                for m in notified:
+                    if m.id not in seen:
+                        unique.append(m)
+                        seen.add(m.id)
+
+                if not unique:
+                    await message.channel.send('Keine Mitglieder mit dem gesuchten Verein gefunden.')
+                else:
+                    mentions = ' '.join(m.mention for m in unique)
+                    allowed = discord.AllowedMentions(users=True)
+                    embed = discord.Embed(title='Groundhelp Anfrage', description=message.content, color=discord.Color.orange())
+                    embed.set_author(name=message.author.display_name, icon_url=getattr(message.author.avatar, 'url', None) if hasattr(message.author, 'avatar') else None)
+                    await message.channel.send(content=mentions, embed=embed, allowed_mentions=allowed)
+
+                return
+        except Exception as e:
+            print(f'Error in groundhelp handler: {e}')
+
+    # Check if message is in set-club or welcome channel
     if message.channel.id == SET_CLUB_CHANNEL_ID or message.channel.id == WELCOME_CHANNEL_ID:
         # Delete user message to keep channel clean
         try:
