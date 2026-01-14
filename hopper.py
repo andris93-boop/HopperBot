@@ -241,6 +241,13 @@ def get_league_tier(league_id):
     conn.close()
     return result[0] if result else 99
 
+def post_embeds(channel, embeds):
+    """Posts a list of embeds to the specified channel, handling Discord's limit of 10 embeds per message."""
+    async def _post():
+        for i in range(0, len(embeds), 10):
+            await channel.send(embeds=embeds[i:i + 10])
+    return _post()
+
 async def post_member_list(guild, channel):
     """Posts the member list sorted by country, league (by tier), and club to the specified channel."""
     # Delete all messages in the channel
@@ -294,8 +301,13 @@ async def post_member_list(guild, channel):
     # Sort countries ('Unknown' last)
     sorted_countries = sorted(countries.keys(), key=lambda s: (s == 'Unknown', s.lower()))
 
+    embeds = []
     for country in sorted_countries:
-        await channel.send(f"═══ **{country}** ═══")
+        
+        embeds.append(discord.Embed(
+           title=f"═══ {country} ═══",
+           color=0x2F3136  # Dark grey
+        ))
 
         # Sort leagues within the country by tier, then alphabetically ('Unknown' last)
         sorted_leagues = sorted(
@@ -306,12 +318,15 @@ async def post_member_list(guild, channel):
         for league_name, league_data in sorted_leagues:
             # Send league header as text
             embed = discord.Embed(
-                title = f"__**{league_name}**__"
+                title = f"__**{league_name}**__",
+                color=0x3498DB  # Blue
             )
             if league_name in logos and LOGO_URL:
-                embed.set_thumbnail(url=LOGO_URL + logos[league_name])
+                embed.set_author(name=f"{league_name}", icon_url=LOGO_URL + logos[league_name])
+            else:
+                embed.set_author(name=f"{league_name}")
 
-            await channel.send(embed=embed)
+            embeds.append(embed)
 
             # Sort clubs within the league ('Unknown' last)
             sorted_clubs = sorted(league_data['clubs'].keys(), key=lambda s: (s == 'Unknown', s.lower()))
@@ -322,14 +337,17 @@ async def post_member_list(guild, channel):
                 # Create embed with club logo
                 embed = discord.Embed(
                     description="\n".join(members),
+                    color=0x2ECC71  # Green
                 )
                 if club in logos and LOGO_URL:
                     embed.set_author(name=f"{club} ({len(members)})", icon_url=LOGO_URL + logos[club])
                 else:
                     embed.set_author(name=f"{club} ({len(members)})")
 
-                await channel.send(embed=embed)
+                embeds.append(embed)
 
+    if len(embeds) > 0:
+        await post_embeds(channel, embeds)
     print(f'Member list sent to channel {channel.name}.')
 
 @bot.event
