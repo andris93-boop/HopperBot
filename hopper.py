@@ -266,6 +266,8 @@ async def post_member_list(guild, channel):
             league_name = data[5].strip() if len(data) > 5 and data[5] else 'Unknown'
             if len(data) >= 5 and data[4]:
                 logos[club_name] = data[4]
+            if len(data) >= 7 and data[6]:
+                logos[league_name] = data[6]
         else:
             club_name = 'Unknown'
             country = 'Unknown'
@@ -303,7 +305,13 @@ async def post_member_list(guild, channel):
 
         for league_name, league_data in sorted_leagues:
             # Send league header as text
-            await channel.send(f"__**{league_name}**__")
+            embed = discord.Embed(
+                title = f"__**{league_name}**__"
+            )
+            if league_name in logos and LOGO_URL:
+                embed.set_thumbnail(url=LOGO_URL + logos[league_name])
+
+            await channel.send(embed=embed)
 
             # Sort clubs within the league ('Unknown' last)
             sorted_clubs = sorted(league_data['clubs'].keys(), key=lambda s: (s == 'Unknown', s.lower()))
