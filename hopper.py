@@ -140,7 +140,7 @@ def get_user_profile(user_id, guild_id):
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT c.name, c.country, up.willingness_to_trade, up.created_at, c.logo, l.name, l.logo
+        SELECT c.name, l.country, up.willingness_to_trade, up.created_at, c.logo, l.name, l.logo, l.tier
         FROM user_profiles up
         LEFT JOIN clubs c ON up.club_id = c.id
         LEFT JOIN leagues l ON c.league_id = l.id
@@ -273,16 +273,7 @@ async def post_member_list(guild, channel):
 
         entry = member.name
 
-        # Get league tier from database
-        if league_name != 'Unknown':
-            conn = sqlite3.connect('hopper_bot.db')
-            cursor = conn.cursor()
-            cursor.execute('SELECT tier FROM leagues WHERE name = ? AND country = ?', (league_name, country))
-            result = cursor.fetchone()
-            tier = result[0] if result else 99
-            conn.close()
-        else:
-            tier = 99
+        tier = data[7] if len(data) > 7 and data[7] is not None else 99
 
         league_tiers[(country, league_name)] = tier
 
