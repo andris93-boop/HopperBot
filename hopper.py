@@ -53,7 +53,6 @@ def init_database():
         CREATE TABLE IF NOT EXISTS clubs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
-            country TEXT NOT NULL,
             league_id INTEGER,
             logo TEXT,
             flag TEXT,
@@ -101,7 +100,7 @@ def get_or_create_league(name, country, tier=99):
     conn.close()
     return league_id
 
-def get_or_create_club(name, country, league_id=None):
+def get_or_create_club(name, league_id=None):
     """Finds a club or creates it if it doesn't exist yet."""
     conn = sqlite3.connect('hopper_bot.db')
     cursor = conn.cursor()
@@ -114,7 +113,7 @@ def get_or_create_club(name, country, league_id=None):
         club_id = result[0]
     else:
         # Create new club
-        cursor.execute('INSERT INTO clubs (name, country, league_id) VALUES (?, ?, ?)', (name, country, league_id))
+        cursor.execute('INSERT INTO clubs (name, league_id) VALUES (?, ?)', (name, league_id))
         club_id = cursor.lastrowid
         conn.commit()
 
@@ -158,7 +157,7 @@ def get_leagues_by_country(country):
     conn = sqlite3.connect('hopper_bot.db')
     cursor = conn.cursor()
 
-    cursor.execute('SELECT name FROM leagues WHERE country = ? ORDER BY name', (country,))
+    cursor.execute('SELECT name FROM leagues WHERE country = ? ORDER BY tier', (country,))
     results = [row[0] for row in cursor.fetchall()]
 
     conn.close()
@@ -172,7 +171,7 @@ def get_clubs_by_country_and_league(country, league):
     cursor.execute('''
         SELECT c.name FROM clubs c
         LEFT JOIN leagues l ON c.league_id = l.id
-        WHERE c.country = ? AND (l.name = ? OR l.name IS NULL)
+        WHERE l.country = ? AND (l.name = ? OR l.name IS NULL)
         ORDER BY c.name
     ''', (country, league))
     results = [row[0] for row in cursor.fetchall()]
@@ -185,7 +184,12 @@ def get_clubs_by_country(country):
     conn = sqlite3.connect('hopper_bot.db')
     cursor = conn.cursor()
 
-    cursor.execute('SELECT name FROM clubs WHERE country = ? ORDER BY name', (country,))
+    cursor.execute('''
+        SELECT c.name FROM clubs c
+        LEFT JOIN leagues l ON c.league_id = l.id
+        WHERE l.country = ?
+        ORDER BY c.name
+    ''', (country))
     results = [row[0] for row in cursor.fetchall()]
 
     conn.close()
@@ -196,7 +200,7 @@ def get_all_countries():
     conn = sqlite3.connect('hopper_bot.db')
     cursor = conn.cursor()
 
-    cursor.execute('SELECT DISTINCT country FROM clubs ORDER BY country')
+    cursor.execute('SELECT DISTINCT country FROM leagues ORDER BY country')
     results = [row[0] for row in cursor.fetchall()]
 
     conn.close()
@@ -207,11 +211,11 @@ def get_club_id_by_name(club_name):
     conn = sqlite3.connect('hopper_bot.db')
     cursor = conn.cursor()
 
-    cursor.execute('SELECT id, country FROM clubs WHERE name = ?', (club_name,))
+    cursor.execute('SELECT id FROM clubs WHERE name = ?', (club_name,))
     result = cursor.fetchone()
 
     conn.close()
-    return result
+    return result[0] if result else None
 
 def update_club_league(club_id, league_id):
     """Updates the league_id of a club."""
@@ -603,7 +607,7 @@ async def set_club_command(
     update_league_tier(league_id, league_tier)
 
     # Create or find the club in the database
-    club_id = get_or_create_club(club, country, league_id)
+    club_id = get_or_create_club(club, league_id)
 
     # Get current profile to check if updating or creating
     current_profile = get_user_profile(member.id, guild.id)
@@ -652,28 +656,28 @@ async def set_club_command(
 @app_commands.describe(
     club="The club to update",
     league="The new league for the club",
+    country="The country of the league",
     league_tier="The league tier/level (1=top tier, 2=second tier, etc.)"
 )
 async def update_league_command(
     interaction: discord.Interaction,
     club: str,
     league: str,
+    country: str,
     league_tier: int
 ):
     """Update a club's league assignment and tier."""
     await interaction.response.defer(ephemeral=True)
 
     # Get club information
-    club_info = get_club_id_by_name(club)
+    club_id = get_club_id_by_name(club)
     
-    if not club_info:
+    if not club_id:
         await interaction.followup.send(
             f"❌ Club '{club}' not found in the database.",
             ephemeral=True
         )
         return
-
-    club_id, country = club_info
 
     # Get or create the league with tier
     league_id = get_or_create_league(league, country, league_tier)
@@ -723,7 +727,6 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
         embed.add_field(name="🌍 Country", value=club_country, inline=False)
         if league_logo and LOGO_URL:
             embed.add_field(name="🏆 League", value=league_name, inline=False)
-            embed.set_thumbnail(url=LOGO_URL + league_logo)
         else:
             embed.add_field(name="🏆 League", value=league_name, inline=False)
         embed.add_field(name="⚽ Home club", value=club_name, inline=False)

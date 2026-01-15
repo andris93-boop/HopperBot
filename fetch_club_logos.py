@@ -7,11 +7,11 @@ from urllib.parse import quote
 # Basis-URL für die Logos
 LOGO_URL = "https://cdn.prod.website-files.com/68f550992570ca0322737dc2/"
 
-def fetch_logo_for_club(club_name, country):
+def fetch_logo_for_club(club_name):
     """
     Fragt die Logo-URL für einen Club ab.
     """
-    print(f'\nClub: {club_name} ({country})')
+    print(f'\nClub: {club_name}')
     logo_url = input('Bitte Logo-URL eingeben (oder Enter zum Überspringen): ').strip()
 
     if not logo_url:
@@ -25,15 +25,15 @@ def update_club_logos():
     cursor = conn.cursor()
 
     # Alle Clubs ohne Logo abrufen
-    cursor.execute('SELECT id, name, country FROM clubs WHERE logo IS NULL OR logo = ""')
+    cursor.execute('SELECT id, name FROM clubs WHERE logo IS NULL OR logo = ""')
     clubs = cursor.fetchall()
 
     print(f'Gefunden: {len(clubs)} Clubs ohne Logo')
 
-    for club_id, club_name, country in clubs:
+    for club_id, club_name in clubs:
         try:
             # Logo-URL für den Club abfragen
-            logo_url = fetch_logo_for_club(club_name, country)
+            logo_url = fetch_logo_for_club(club_name)
 
             if not logo_url:
                 print('  → Übersprungen\n')
