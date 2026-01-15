@@ -277,9 +277,12 @@ async def post_member_list(guild, channel):
             country = data[1].strip()
             if len(data) > 7:
                 league_name = data[5].strip()
-                logos[club_name] = data[4].strip()
-                logos[league_name] = data[6].strip()
-                flags[country] = data[8].strip()
+                if data[4]:
+                    logos[club_name] = data[4].strip()
+                if data[6]:
+                    logos[league_name] = data[6].strip()
+                if data[8]:
+                    flags[country] = data[8].strip()
                 tier = data[7]
         else:
             club_name = 'Unknown'
@@ -318,8 +321,8 @@ async def post_member_list(guild, channel):
 
         for league_name, league_data in sorted_leagues:
             embeds = []
-            # Send league header as text
-            msg = f"\n**-- {league_name} (Tier {league_data['tier']}) --**\n"
+            # Suche nach Name
+            msg = f"\n**{league_name}**\n"
 
             # Sort clubs within the league ('Unknown' last)
             sorted_clubs = sorted(league_data['clubs'].keys(), key=lambda s: (s == 'Unknown', s.lower()))
