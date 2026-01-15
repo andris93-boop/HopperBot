@@ -242,11 +242,14 @@ def get_league_tier(league_id):
     conn.close()
     return result[0] if result else 99
 
-def post_embeds(channel, embeds):
+def post_embeds(channel, msg, embeds):
     """Posts a list of embeds to the specified channel, handling Discord's limit of 10 embeds per message."""
     async def _post():
         for i in range(0, len(embeds), 10):
-            await channel.send(embeds=embeds[i:i + 10])
+            if len(msg) > 0 and i == 0:
+                await channel.send(msg, embeds=embeds[i:i + 10])
+            else:
+                await channel.send(embeds=embeds[i:i + 10])
     return _post()
 
 async def post_member_list(guild, channel):
@@ -304,13 +307,8 @@ async def post_member_list(guild, channel):
     # Sort countries ('Unknown' last)
     sorted_countries = sorted(countries.keys(), key=lambda s: (s == 'Unknown', s.lower()))
 
-    embeds = []
     for country in sorted_countries:
-        
-        embeds.append(discord.Embed(
-           title=f"═══ {country} {flags.get(country, '')} ═══",
-           color=discord.Color.gold()
-        ))
+        await channel.send(f"═══ {country} {flags.get(country, '')} ═══\n")
 
         # Sort leagues within the country by tier, then alphabetically ('Unknown' last)
         sorted_leagues = sorted(
@@ -319,16 +317,9 @@ async def post_member_list(guild, channel):
         )
 
         for league_name, league_data in sorted_leagues:
+            embeds = []
             # Send league header as text
-            embed = discord.Embed(
-                color=discord.Color.blue()
-            )
-            if league_name in logos and LOGO_URL:
-                embed.set_author(name=f"{league_name}", icon_url=LOGO_URL + logos[league_name])
-            else:
-                embed.set_author(name=f"{league_name}")
-
-            embeds.append(embed)
+            msg = f"\n**-- {league_name} (Tier {league_data['tier']}) --**\n"
 
             # Sort clubs within the league ('Unknown' last)
             sorted_clubs = sorted(league_data['clubs'].keys(), key=lambda s: (s == 'Unknown', s.lower()))
@@ -348,8 +339,9 @@ async def post_member_list(guild, channel):
 
                 embeds.append(embed)
 
-    if len(embeds) > 0:
-        await post_embeds(channel, embeds)
+            if len(embeds) > 0:
+                await post_embeds(channel, msg, embeds)
+
     print(f'Member list sent to channel {channel.name}.')
 
 @bot.event
