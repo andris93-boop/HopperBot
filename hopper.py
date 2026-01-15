@@ -56,6 +56,7 @@ def init_database():
             country TEXT NOT NULL,
             league_id INTEGER,
             logo TEXT,
+            flag TEXT,
             FOREIGN KEY (league_id) REFERENCES leagues(id)
         )
     ''')
@@ -140,7 +141,7 @@ def get_user_profile(user_id, guild_id):
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT c.name, l.country, up.willingness_to_trade, up.created_at, c.logo, l.name, l.logo, l.tier
+        SELECT c.name, l.country, up.willingness_to_trade, up.created_at, c.logo, l.name, l.logo, l.tier, l.flag
         FROM user_profiles up
         LEFT JOIN clubs c ON up.club_id = c.id
         LEFT JOIN leagues l ON c.league_id = l.id
@@ -261,6 +262,7 @@ async def post_member_list(guild, channel):
     countries = {}  # Format: {country: {league_name: {'tier': int, 'clubs': {club_name: [members]}}}}
     logos = {}  # Format: {club_name: logo_url}
     league_tiers = {}  # Format: {(country, league_name): tier}
+    flags = {}  # Format: {country: flag}
 
     for member in guild.members:
         if member.bot:
@@ -269,20 +271,21 @@ async def post_member_list(guild, channel):
 
         if data and data[0]:
             club_name = data[0].strip()
-            country = data[1].strip() if data[1] else 'Unknown'
-            league_name = data[5].strip() if len(data) > 5 and data[5] else 'Unknown'
-            if len(data) >= 5 and data[4]:
-                logos[club_name] = data[4]
-            if len(data) >= 7 and data[6]:
-                logos[league_name] = data[6]
+            country = data[1].strip()
+            if len(data) > 7:
+                league_name = data[5].strip()
+                logos[club_name] = data[4].strip()
+                logos[league_name] = data[6].strip()
+                flags[country] = data[8].strip()
+                tier = data[7]
         else:
             club_name = 'Unknown'
             country = 'Unknown'
             league_name = 'Unknown'
+            flags[country] = ''
+            tier = 99
 
         entry = member.name
-
-        tier = data[7] if len(data) > 7 and data[7] is not None else 99
 
         league_tiers[(country, league_name)] = tier
 
@@ -305,8 +308,8 @@ async def post_member_list(guild, channel):
     for country in sorted_countries:
         
         embeds.append(discord.Embed(
-           title=f"═══ {country} ═══",
-           color=0x2F3136  # Dark grey
+           title=f"═══ {country} {flags.get(country, '')} ═══",
+           color=discord.Color.gold()
         ))
 
         # Sort leagues within the country by tier, then alphabetically ('Unknown' last)
@@ -318,8 +321,7 @@ async def post_member_list(guild, channel):
         for league_name, league_data in sorted_leagues:
             # Send league header as text
             embed = discord.Embed(
-                title = f"__**{league_name}**__",
-                color=0x3498DB  # Blue
+                color=discord.Color.blue()
             )
             if league_name in logos and LOGO_URL:
                 embed.set_author(name=f"{league_name}", icon_url=LOGO_URL + logos[league_name])
@@ -337,7 +339,7 @@ async def post_member_list(guild, channel):
                 # Create embed with club logo
                 embed = discord.Embed(
                     description="\n".join(members),
-                    color=0x2ECC71  # Green
+                    color=discord.Color.green()
                 )
                 if club in logos and LOGO_URL:
                     embed.set_author(name=f"{club} ({len(members)})", icon_url=LOGO_URL + logos[club])
