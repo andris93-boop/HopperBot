@@ -251,9 +251,9 @@ def post_embeds(channel, msg, embeds):
     async def _post():
         for i in range(0, len(embeds), 10):
             if len(msg) > 0 and i == 0:
-                await channel.send(msg, embeds=embeds[i:i + 10])
+                await channel.send(msg, embeds=embeds[i:i + 10], allowed_mentions=discord.AllowedMentions.none())
             else:
-                await channel.send(embeds=embeds[i:i + 10])
+                await channel.send(embeds=embeds[i:i + 10], allowed_mentions=discord.AllowedMentions.none())
     return _post()
 
 async def post_member_list(guild, channel):
@@ -295,7 +295,7 @@ async def post_member_list(guild, channel):
             flags[country] = ''
             tier = 99
 
-        entry = member.name
+        entry = member.mention
 
         league_tiers[(country, league_name)] = tier
 
