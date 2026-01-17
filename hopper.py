@@ -73,6 +73,16 @@ def init_database():
         )
     ''')
 
+    # Table for user tags
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            tag TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     conn.commit()
     conn.close()
     print('Database initialized.')
@@ -235,16 +245,60 @@ def update_league_tier(league_id, tier):
     conn.commit()
     conn.close()
 
-def get_league_tier(league_id):
-    """Gets the tier of a league."""
+def get_user_tags(user_id):
+    """Fetches all tags for a user."""
     conn = sqlite3.connect('hopper_bot.db')
     cursor = conn.cursor()
 
-    cursor.execute('SELECT tier FROM leagues WHERE id = ?', (league_id,))
-    result = cursor.fetchone()
+    cursor.execute('SELECT tag FROM tags WHERE user_id = ? ORDER BY created_at', (user_id,))
+    results = [row[0] for row in cursor.fetchall()]
 
     conn.close()
-    return result[0] if result else 99
+    return results
+
+def save_user_tags(user_id, tags):
+    """Saves tags for a user. Replaces existing tags."""
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+
+    # Delete existing tags
+    cursor.execute('DELETE FROM tags WHERE user_id = ?', (user_id,))
+
+    # Insert new tags
+    for tag in tags:
+        if tag.strip():  # Only save non-empty tags
+            cursor.execute('INSERT INTO tags (user_id, tag) VALUES (?, ?)', (user_id, tag.strip()))
+
+    conn.commit()
+    conn.close()
+
+def add_user_tags(user_id, tags):
+    """Adds tags to a user's existing tags."""
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+
+    # Get existing tags to avoid duplicates
+    cursor.execute('SELECT tag FROM tags WHERE user_id = ?', (user_id,))
+    existing_tags = set(row[0] for row in cursor.fetchall())
+
+    # Insert new tags if they don't exist
+    for tag in tags:
+        if tag.strip() and tag.strip() not in existing_tags:
+            cursor.execute('INSERT INTO tags (user_id, tag) VALUES (?, ?)', (user_id, tag.strip()))
+
+    conn.commit()
+    conn.close()
+
+def get_all_tags():
+    """Fetches all unique tags from all users."""
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT DISTINCT tag FROM tags ORDER BY tag')
+    results = [row[0] for row in cursor.fetchall()]
+
+    conn.close()
+    return results
 
 def post_embeds(channel, msg, embeds):
     """Posts a list of embeds to the specified channel, handling Discord's limit of 10 embeds per message."""
@@ -571,6 +625,19 @@ async def club_autocomplete(interaction: discord.Interaction, current: str):
 
     return [app_commands.Choice(name=club, value=club) for club in filtered[:25]]
 
+# Autocomplete for tags
+async def tag_autocomplete(interaction: discord.Interaction, current: str):
+    """Autocomplete for tag selection."""
+    all_tags = get_all_tags()
+
+    # Filter based on current input
+    if current:
+        filtered = [t for t in all_tags if current.lower() in t.lower()]
+    else:
+        filtered = all_tags
+
+    return [app_commands.Choice(name=tag, value=tag) for tag in filtered[:25]]
+
 # Slash command: /set-club
 @bot.tree.command(name="set-club", description="Set or update your home club", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(
@@ -703,16 +770,76 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
         club_logo = profile[3] if len(profile) > 3 and profile[3] else None
         league_name = profile[4] if len(profile) > 4 and profile[4] else 'Unknown'
         
+        # Get user tags
+        tags = get_user_tags(member.id)
+        tags_str = ', '.join(tags) if tags else 'No tags set'
+        
         embed = discord.Embed(title=f"Profile of {member.display_name}", color=discord.Color.blue())
         embed.add_field(name="🌍 Country", value=club_country, inline=True)
         embed.add_field(name="🏆 League", value=league_name, inline=False)
         if club_logo and LOGO_URL:
             embed.set_thumbnail(url=LOGO_URL + club_logo)
         embed.add_field(name="⚽ Home club", value=club_name, inline=False)
+        embed.add_field(name="🏷️ Tags", value=tags_str, inline=False)
         embed.set_footer(text=f"Created on: {created_at}")
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message(f"No profile found for {member.display_name}.", ephemeral=True)
+
+# Slash command: /tags
+@bot.tree.command(name="tags", description="Set or update your tags (replaces all existing tags)", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(tags="Enter your tags separated by commas (e.g., 'Scarves, Pins, Programs')")
+@app_commands.autocomplete(tags=tag_autocomplete)
+async def tags_command(interaction: discord.Interaction, tags: str):
+    """Slash command to set or update user's tags."""
+    member = interaction.user
+    guild = interaction.guild
+    
+    # Split tags by comma and clean up
+    tag_list = [tag.strip() for tag in tags.split(',') if tag.strip()]
+    
+    if not tag_list:
+        await interaction.response.send_message("❌ Please provide at least one tag.", ephemeral=True)
+        return
+    
+    # Save tags
+    save_user_tags(member.id, tag_list)
+    
+    await interaction.response.send_message(
+        f"✅ Your tags have been updated!\n\n"
+        f"**Tags:** {', '.join(tag_list)}",
+        ephemeral=True
+    )
+
+# Slash command: /add-tag
+@bot.tree.command(name="add-tag", description="Add new tags to your existing tags", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(tags="Enter new tags separated by commas (e.g., 'Scarves, Pins')")
+@app_commands.autocomplete(tags=tag_autocomplete)
+async def add_tag_command(interaction: discord.Interaction, tags: str):
+    """Slash command to add tags to user's existing tags."""
+    member = interaction.user
+    
+    # Split tags by comma and clean up
+    tag_list = [tag.strip() for tag in tags.split(',') if tag.strip()]
+    
+    if not tag_list:
+        await interaction.response.send_message("❌ Please provide at least one tag.", ephemeral=True)
+        return
+    
+    # Get existing tags
+    existing_tags = get_user_tags(member.id)
+    
+    # Add tags
+    add_user_tags(member.id, tag_list)
+    
+    # Get updated tags
+    updated_tags = get_user_tags(member.id)
+    
+    await interaction.response.send_message(
+        f"✅ Tags added successfully!\n\n"
+        f"**Your tags:** {', '.join(updated_tags)}",
+        ephemeral=True
+    )
 
 # Start the bot
 bot.run(TOKEN)
