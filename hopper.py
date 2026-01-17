@@ -496,12 +496,13 @@ async def on_message(message):
     # Ignore bot messages
     if message.author.bot:
         return
+
     # Groundhelp channel: detect !ClubName and notify matching members
     if message.channel.id == GROUNDHELP_CHANNEL_ID:
         try:
             content = message.content
             import re
-            matches = re.findall(r'!([^!\n?.!,;:]+)', content)
+            matches = re.findall(r'$([^!\n?.!,;:]{5,})', content)
             if matches:
                 guild = message.guild
                 notified = []
