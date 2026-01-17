@@ -340,6 +340,44 @@ def increment_activity(user_id):
     conn.commit()
     conn.close()
 
+def get_user_level(user_id):
+    """Calculates user level based on activity in the last 2 weeks."""
+    from datetime import date, timedelta
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+    
+    today = date.today()
+    two_weeks_ago = today - timedelta(days=14)
+    
+    # Count distinct days with activity in the last 2 weeks
+    cursor.execute('''
+        SELECT COUNT(DISTINCT date)
+        FROM activity
+        WHERE user_id = ? AND date >= ?
+    ''', (user_id, two_weeks_ago))
+    
+    result = cursor.fetchone()
+    conn.close()
+    
+    active_days = result[0] if result else 0
+    
+    # Determine level based on active days
+    if active_days >= 5:
+        return "Ultra"
+    elif active_days >= 2:
+        return "Fan"
+    else:
+        return ""
+
+def get_user_activity_days(user_id):
+    """Returns the total number of distinct active days for a user."""
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(DISTINCT date) FROM activity WHERE user_id = ?', (user_id,))
+    active_days = cursor.fetchone()[0]
+    conn.close()
+    return active_days
+
 def post_embeds(channel, msg, embeds):
     """Posts a list of embeds to the specified channel, handling Discord's limit of 10 embeds per message."""
     async def _post():
@@ -364,6 +402,7 @@ async def post_member_list(guild, channel):
     logos = {}  # Format: {club_name: logo_url}
     league_tiers = {}  # Format: {(country, league_name): tier}
     flags = {}  # Format: {country: flag}
+    levels = {}  # Format: {member_id: level}
 
     for member in guild.members:
         if member.bot:
@@ -389,7 +428,7 @@ async def post_member_list(guild, channel):
         flags[country] = flags.get(country, '')
         tier = tier or 99
 
-        entry = member.mention
+        entry = f'{member.mention} {get_user_level(member.id)}'
 
         league_tiers[(country, league_name)] = tier
 
@@ -805,12 +844,7 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
     if member is None:
         member = interaction.user
 
-    # count days from activity table
-    conn = sqlite3.connect('hopper_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(DISTINCT date) FROM activity WHERE user_id = ?', (member.id,))
-    active_days = cursor.fetchone()[0]
-    conn.close()
+    active_days = get_user_activity_days(member.id)
 
     profile = get_user_profile(member.id, interaction.guild.id)
 
@@ -827,7 +861,11 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
         tags = get_user_tags(member.id)
         tags_str = ', '.join(tags) if tags else 'No tags set'
         
-        embed = discord.Embed(title=f"Profile of {member.display_name}", color=discord.Color.blue())
+        level = get_user_level(member.id)
+        if level == "":
+            level = "Inactive"
+
+        embed = discord.Embed(title=f"Profile of {member.display_name} ({level})", color=discord.Color.blue())
         url = logo2URL(club_logo)
         if url:
             embed.set_thumbnail(url=url)
