@@ -30,6 +30,14 @@ intents.message_content = True
 intents.members = True  # Required to fetch members
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+def logo2URL(logo_suffix):
+    """Converts a logo suffix to a full URL."""
+    if logo_suffix.startswith('http://') or logo_suffix.startswith('https://'):
+        return logo_suffix
+    if logo_suffix and LOGO_URL:
+        return LOGO_URL + logo_suffix
+    return None
+
 # Initialize database
 def init_database():
     """Creates the SQLite database and tables for user profiles and clubs."""
@@ -110,25 +118,27 @@ def get_or_create_league(name, country, tier=99):
     conn.close()
     return league_id
 
-def get_or_create_club(name, league_id=None):
+def get_or_create_club(name):
     """Finds a club or creates it if it doesn't exist yet."""
     conn = sqlite3.connect('hopper_bot.db')
     cursor = conn.cursor()
 
     # Check if club already exists
-    cursor.execute('SELECT id FROM clubs WHERE name = ?', (name,))
+    cursor.execute('SELECT id, league_id FROM clubs WHERE name = ?', (name,))
     result = cursor.fetchone()
 
     if result:
         club_id = result[0]
+        league_id = result[1]
     else:
         # Create new club
-        cursor.execute('INSERT INTO clubs (name, league_id) VALUES (?, ?)', (name, league_id))
+        cursor.execute('INSERT INTO clubs (name) VALUES (?)', (name,))
         club_id = cursor.lastrowid
+        league_id = None
         conn.commit()
 
     conn.close()
-    return club_id
+    return club_id, league_id
 
 def save_user_profile(user_id, guild_id, club_id):
     """Saves the user profile to the database."""
@@ -181,7 +191,8 @@ def get_clubs_by_country_and_league(country, league):
     cursor.execute('''
         SELECT c.name FROM clubs c
         LEFT JOIN leagues l ON c.league_id = l.id
-        WHERE l.country = ? AND (l.name = ? OR l.name IS NULL)
+        WHERE (l.country = ? OR l.country IS NULL)
+          AND (l.name = ? OR l.name IS NULL)
         ORDER BY c.name
     ''', (country, league))
     results = [row[0] for row in cursor.fetchall()]
@@ -197,9 +208,9 @@ def get_clubs_by_country(country):
     cursor.execute('''
         SELECT c.name FROM clubs c
         LEFT JOIN leagues l ON c.league_id = l.id
-        WHERE l.country = ?
+        WHERE (l.country = ? OR l.country IS NULL)
         ORDER BY c.name
-    ''', (country))
+    ''', (country,))
     results = [row[0] for row in cursor.fetchall()]
 
     conn.close()
@@ -331,23 +342,23 @@ async def post_member_list(guild, channel):
         data = get_user_profile(member.id, guild.id)
 
         if data and data[0]:
-            club_name = data[0].strip()
-            country = data[1].strip()
+            club_name = data[0]
+            country = data[1]
             if len(data) > 7:
-                league_name = data[4].strip()
+                league_name = data[4]
                 if data[3]:
-                    logos[club_name] = data[3].strip()
+                    logos[club_name] = data[3]
                 if data[5]:
-                    logos[league_name] = data[5].strip()
+                    logos[league_name] = data[5]
                 if data[7]:
-                    flags[country] = data[7].strip()
+                    flags[country] = data[7]
                 tier = data[6]
-        else:
-            club_name = 'Unknown'
-            country = 'Unknown'
-            league_name = 'Unknown'
-            flags[country] = ''
-            tier = 99
+        
+        club_name = club_name or 'Unknown'
+        country = country or 'Unknown'
+        league_name = league_name or 'Unknown'
+        flags[country] = flags.get(country, '')
+        tier = tier or 99
 
         entry = member.mention
 
@@ -390,11 +401,12 @@ async def post_member_list(guild, channel):
 
                 # Create embed with club logo
                 embed = discord.Embed(
-                    description="\n".join(members),
+                    description=", ".join(members),
                     color=discord.Color.green()
                 )
-                if club in logos and LOGO_URL:
-                    embed.set_author(name=f"{club} ({len(members)})", icon_url=LOGO_URL + logos[club])
+                url = logo2URL(logos.get(club, ''))
+                if url:
+                    embed.set_author(name=f"{club} ({len(members)})", icon_url=url)
                 else:
                     embed.set_author(name=f"{club} ({len(members)})")
 
@@ -642,16 +654,12 @@ async def tag_autocomplete(interaction: discord.Interaction, current: str):
 @bot.tree.command(name="set-club", description="Set or update your home club", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(
     country="The country your club is from",
-    league="The league your club plays in",
-    league_tier="The league tier/level (1=top tier, 2=second tier, etc.)",
     club="Your home club name"
 )
-@app_commands.autocomplete(country=country_autocomplete, league=league_autocomplete, club=club_autocomplete)
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
 async def set_club_command(
     interaction: discord.Interaction,
     country: str,
-    league: str,
-    league_tier: int,
     club: str
 ):
     """Slash command to set or update user's club."""
@@ -660,14 +668,8 @@ async def set_club_command(
     member = interaction.user
     guild = interaction.guild
 
-    # Create or find the league in the database
-    league_id = get_or_create_league(league, country, league_tier)
-
-    # Update league tier in case it was just created or changed
-    update_league_tier(league_id, league_tier)
-
     # Create or find the club in the database
-    club_id = get_or_create_club(club, league_id)
+    club_id, league_id = get_or_create_club(club)
 
     # Save profile
     save_user_profile(member.id, guild.id, club_id)
@@ -675,7 +677,6 @@ async def set_club_command(
     await interaction.followup.send(
         f"✅ Your club has been updated!\n\n"
         f"**Country:** {country}\n"
-        f"**League:** {league} (Tier {league_tier})\n"
         f"**Club:** {club}",
         ephemeral=True
     )
@@ -699,19 +700,26 @@ async def set_club_command(
         except Exception as e:
             print(f'Error updating member list: {e}')
 
+    if league_id is None:
+        await interaction.followup.send(
+            f"⚠️ Note: The club '{club}' is not yet assigned to a league. "
+            f"Please contact an admin to update the league information.",
+            ephemeral=True
+        )
 # Slash command: /update-league
 @bot.tree.command(name="update-league", description="Update a club's league and tier", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(
+    country="The country of the league",
     club="The club to update",
     league="The new league for the club",
-    country="The country of the league",
     league_tier="The league tier/level (1=top tier, 2=second tier, etc.)"
 )
+@app_commands.autocomplete( club=club_autocomplete, league=league_autocomplete, country=country_autocomplete)
 async def update_league_command(
     interaction: discord.Interaction,
+    country: str,
     club: str,
     league: str,
-    country: str,
     league_tier: int
 ):
     """Update a club's league assignment and tier."""
@@ -763,23 +771,24 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
 
     profile = get_user_profile(member.id, interaction.guild.id)
 
+    club = ["", "", ""]
     if profile:
-        club_name = profile[0]
-        club_country = profile[1]
+        club[0] = profile[0] if profile[0] else 'Unknown'
+        club[1] = profile[4] if len(profile) > 4 and profile[4] else 'Unknown'
+        club[2] = profile[7] if len(profile) > 7 and profile[7] else profile[1]
         created_at = profile[2]
         club_logo = profile[3] if len(profile) > 3 and profile[3] else None
-        league_name = profile[4] if len(profile) > 4 and profile[4] else 'Unknown'
         
+        club_text = " - ".join(club)
         # Get user tags
         tags = get_user_tags(member.id)
         tags_str = ', '.join(tags) if tags else 'No tags set'
         
         embed = discord.Embed(title=f"Profile of {member.display_name}", color=discord.Color.blue())
-        embed.add_field(name="🌍 Country", value=club_country, inline=True)
-        embed.add_field(name="🏆 League", value=league_name, inline=False)
-        if club_logo and LOGO_URL:
-            embed.set_thumbnail(url=LOGO_URL + club_logo)
-        embed.add_field(name="⚽ Home club", value=club_name, inline=False)
+        url = logo2URL(club_logo)
+        if url:
+            embed.set_thumbnail(url=url)
+        embed.add_field(name="⚽ Home club", value=club_text , inline=False)
         embed.add_field(name="🏷️ Tags", value=tags_str, inline=False)
         embed.set_footer(text=f"Created on: {created_at}")
         await interaction.response.send_message(embed=embed)
