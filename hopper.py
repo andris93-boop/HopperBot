@@ -720,51 +720,20 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
         club_country = profile[1]
         willingness_to_trade = profile[2]
         created_at = profile[3]
+        club_logo = profile[4] if len(profile) > 4 and profile[4] else None
         league_name = profile[5] if len(profile) > 5 and profile[5] else 'Unknown'
-        league_logo = profile[6] if len(profile) > 6 and profile[6] else None
         
         embed = discord.Embed(title=f"Profile of {member.display_name}", color=discord.Color.blue())
-        embed.add_field(name="🌍 Country", value=club_country, inline=False)
-        if league_logo and LOGO_URL:
-            embed.add_field(name="🏆 League", value=league_name, inline=False)
-        else:
-            embed.add_field(name="🏆 League", value=league_name, inline=False)
+        embed.add_field(name="🌍 Country", value=club_country, inline=True)
+        embed.add_field(name="🏆 League", value=league_name, inline=False)
+        if club_logo and LOGO_URL:
+            embed.set_thumbnail(url=LOGO_URL + club_logo)
         embed.add_field(name="⚽ Home club", value=club_name, inline=False)
         embed.add_field(name="🔄 Willingness to trade", value=willingness_to_trade, inline=False)
         embed.set_footer(text=f"Created on: {created_at}")
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message(f"No profile found for {member.display_name}.", ephemeral=True)
-
-@bot.command(name='profile')
-async def show_profile(ctx, member: discord.Member = None):
-    """Shows a user's profile."""
-    if member is None:
-        member = ctx.author
-
-    profile = get_user_profile(member.id, ctx.guild.id)
-
-    if profile:
-        club_name = profile[0]
-        club_country = profile[1]
-        willingness_to_trade = profile[2]
-        created_at = profile[3]
-        league_name = profile[5] if len(profile) > 5 and profile[5] else 'Unknown'
-        league_logo = profile[6] if len(profile) > 6 and profile[6] else None
-        
-        embed = discord.Embed(title=f"Profile of {member.display_name}", color=discord.Color.blue())
-        embed.add_field(name="🌍 Country", value=club_country, inline=False)
-        if league_logo and LOGO_URL:
-            embed.add_field(name="🏆 League", value=league_name, inline=False)
-            embed.set_thumbnail(url=LOGO_URL + league_logo)
-        else:
-            embed.add_field(name="🏆 League", value=league_name, inline=False)
-        embed.add_field(name="⚽ Home club", value=club_name, inline=False)
-        embed.add_field(name="🔄 Willingness to trade", value=willingness_to_trade, inline=False)
-        embed.set_footer(text=f"Created on: {created_at}")
-        await ctx.send(embed=embed)
-    else:
-        await ctx.send(f"No profile found for {member.display_name}.")
 
 # Start the bot
 bot.run(TOKEN)
