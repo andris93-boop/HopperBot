@@ -778,7 +778,8 @@ async def set_club_command(
     if league_id is None:
         await interaction.followup.send(
             f"⚠️ Note: The club '{club}' is not yet assigned to a league. "
-            f"Please contact an admin to update the league information.",
+            f"Please contact an admin or update the league information yourself "
+            f"with the /update-league command.",
             ephemeral=True
         )
 # Slash command: /update-league
