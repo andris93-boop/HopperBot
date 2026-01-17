@@ -120,16 +120,16 @@ def get_or_create_club(name, league_id=None):
     conn.close()
     return club_id
 
-def save_user_profile(user_id, guild_id, club_id, willingness_to_trade):
+def save_user_profile(user_id, guild_id, club_id):
     """Saves the user profile to the database."""
     conn = sqlite3.connect('hopper_bot.db')
     cursor = conn.cursor()
 
     cursor.execute('''
         INSERT OR REPLACE INTO user_profiles
-        (user_id, guild_id, club_id, willingness_to_trade)
-        VALUES (?, ?, ?, ?)
-    ''', (user_id, guild_id, club_id, willingness_to_trade))
+        (user_id, guild_id, club_id)
+        VALUES (?, ?, ?)
+    ''', (user_id, guild_id, club_id))
 
     conn.commit()
     conn.close()
@@ -140,7 +140,7 @@ def get_user_profile(user_id, guild_id):
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT c.name, l.country, up.willingness_to_trade, up.created_at, c.logo, l.name, l.logo, l.tier, l.flag
+        SELECT c.name, l.country, up.created_at, c.logo, l.name, l.logo, l.tier, l.flag
         FROM user_profiles up
         LEFT JOIN clubs c ON up.club_id = c.id
         LEFT JOIN leagues l ON c.league_id = l.id
@@ -280,14 +280,14 @@ async def post_member_list(guild, channel):
             club_name = data[0].strip()
             country = data[1].strip()
             if len(data) > 7:
-                league_name = data[5].strip()
-                if data[4]:
-                    logos[club_name] = data[4].strip()
-                if data[6]:
-                    logos[league_name] = data[6].strip()
-                if data[8]:
-                    flags[country] = data[8].strip()
-                tier = data[7]
+                league_name = data[4].strip()
+                if data[3]:
+                    logos[club_name] = data[3].strip()
+                if data[5]:
+                    logos[league_name] = data[5].strip()
+                if data[7]:
+                    flags[country] = data[7].strip()
+                tier = data[6]
         else:
             club_name = 'Unknown'
             country = 'Unknown'
@@ -577,22 +577,15 @@ async def club_autocomplete(interaction: discord.Interaction, current: str):
     country="The country your club is from",
     league="The league your club plays in",
     league_tier="The league tier/level (1=top tier, 2=second tier, etc.)",
-    club="Your home club name",
-    willingness_to_trade="Are you willing to trade memorabilia?"
+    club="Your home club name"
 )
 @app_commands.autocomplete(country=country_autocomplete, league=league_autocomplete, club=club_autocomplete)
-@app_commands.choices(willingness_to_trade=[
-    app_commands.Choice(name="Yes", value="Yes"),
-    app_commands.Choice(name="No", value="No"),
-    app_commands.Choice(name="Maybe", value="Maybe")
-])
 async def set_club_command(
     interaction: discord.Interaction,
     country: str,
     league: str,
     league_tier: int,
-    club: str,
-    willingness_to_trade: app_commands.Choice[str] = None
+    club: str
 ):
     """Slash command to set or update user's club."""
     await interaction.response.defer(ephemeral=True)
@@ -609,26 +602,14 @@ async def set_club_command(
     # Create or find the club in the database
     club_id = get_or_create_club(club, league_id)
 
-    # Get current profile to check if updating or creating
-    current_profile = get_user_profile(member.id, guild.id)
-
-    # Determine willingness to trade
-    if willingness_to_trade:
-        trade_value = willingness_to_trade.value
-    elif current_profile:
-        trade_value = current_profile[2]  # Keep existing value
-    else:
-        trade_value = 'Unknown'
-
     # Save profile
-    save_user_profile(member.id, guild.id, club_id, trade_value)
+    save_user_profile(member.id, guild.id, club_id)
 
     await interaction.followup.send(
         f"✅ Your club has been updated!\n\n"
         f"**Country:** {country}\n"
         f"**League:** {league} (Tier {league_tier})\n"
-        f"**Club:** {club}\n"
-        f"**Willingness to trade:** {trade_value}",
+        f"**Club:** {club}",
         ephemeral=True
     )
 
@@ -718,10 +699,9 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
     if profile:
         club_name = profile[0]
         club_country = profile[1]
-        willingness_to_trade = profile[2]
-        created_at = profile[3]
-        club_logo = profile[4] if len(profile) > 4 and profile[4] else None
-        league_name = profile[5] if len(profile) > 5 and profile[5] else 'Unknown'
+        created_at = profile[2]
+        club_logo = profile[3] if len(profile) > 3 and profile[3] else None
+        league_name = profile[4] if len(profile) > 4 and profile[4] else 'Unknown'
         
         embed = discord.Embed(title=f"Profile of {member.display_name}", color=discord.Color.blue())
         embed.add_field(name="🌍 Country", value=club_country, inline=True)
@@ -729,7 +709,6 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
         if club_logo and LOGO_URL:
             embed.set_thumbnail(url=LOGO_URL + club_logo)
         embed.add_field(name="⚽ Home club", value=club_name, inline=False)
-        embed.add_field(name="🔄 Willingness to trade", value=willingness_to_trade, inline=False)
         embed.set_footer(text=f"Created on: {created_at}")
         await interaction.response.send_message(embed=embed)
     else:
