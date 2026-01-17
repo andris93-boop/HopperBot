@@ -91,6 +91,16 @@ def init_database():
         )
     ''')
 
+    # Table for user activity
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS activity (
+            user_id INTEGER NOT NULL,
+            date DATE NOT NULL,
+            hits INTEGER DEFAULT 1,
+            PRIMARY KEY (user_id, date)
+        )
+    ''')
+
     conn.commit()
     conn.close()
     print('Database initialized.')
@@ -311,6 +321,25 @@ def get_all_tags():
     conn.close()
     return results
 
+def increment_activity(user_id):
+    """Increments the activity counter for a user for today."""
+    from datetime import date
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+    
+    today = date.today()
+    
+    # Try to increment existing record, or insert new one
+    cursor.execute('''
+        INSERT INTO activity (user_id, date, hits)
+        VALUES (?, ?, 1)
+        ON CONFLICT(user_id, date) 
+        DO UPDATE SET hits = hits + 1
+    ''', (user_id, today))
+    
+    conn.commit()
+    conn.close()
+
 def post_embeds(channel, msg, embeds):
     """Posts a list of embeds to the specified channel, handling Discord's limit of 10 embeds per message."""
     async def _post():
@@ -496,6 +525,12 @@ async def on_message(message):
     # Ignore bot messages
     if message.author.bot:
         return
+
+    # Increment activity counter for the user
+    try:
+        increment_activity(message.author.id)
+    except Exception as e:
+        print(f'Error incrementing activity: {e}')
 
     # Groundhelp channel: detect !ClubName and notify matching members
     if message.channel.id == GROUNDHELP_CHANNEL_ID:
@@ -770,6 +805,13 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
     if member is None:
         member = interaction.user
 
+    # count days from activity table
+    conn = sqlite3.connect('hopper_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(DISTINCT date) FROM activity WHERE user_id = ?', (member.id,))
+    active_days = cursor.fetchone()[0]
+    conn.close()
+
     profile = get_user_profile(member.id, interaction.guild.id)
 
     club = ["", "", ""]
@@ -791,6 +833,7 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
             embed.set_thumbnail(url=url)
         embed.add_field(name="⚽ Home club", value=club_text , inline=False)
         embed.add_field(name="🏷️ Tags", value=tags_str, inline=False)
+        embed.add_field(name="📅 Active days", value=str(active_days), inline=False)
         embed.set_footer(text=f"Created on: {created_at}")
         await interaction.response.send_message(embed=embed)
     else:
