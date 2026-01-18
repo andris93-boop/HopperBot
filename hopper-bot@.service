@@ -1,20 +1,18 @@
 [Unit]
-Description=Hopper Discord Bot
+Description=Hopper Discord Bot (%i)
 After=network-online.target
 Wants=network-online.target
+ConditionPathExists=%h/%i/hopper.py
+ConditionPathExists=%h/%i/.env
 
 [Service]
 Type=simple
-WorkingDirectory=%h/hopper-bot
-ExecStart=/usr/bin/python3 -u %h/hopper-bot/hopper.py
+WorkingDirectory=%h/%i
+ExecStart=/usr/bin/python3 -u %h/%i/hopper.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-
-# Resource limits (optional)
-# MemoryLimit=512M
-# CPUQuota=50%
 
 [Install]
 WantedBy=default.target
