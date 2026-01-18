@@ -1,18 +1,17 @@
-#!/bin/bash
+#!/bin/sh
 
 # Load environment variables
 if [ -f .env ]; then
-    LOGO_URL="$(grep LOGO_URL .env | cut -d" " -f3)"
+    . .env
 fi
 
 # Create PNG directory if it doesn't exist
 mkdir -p PNG
 
-# Database file
-DB="hopper_bot.db"
+QUERY="SELECT id, name, logo FROM clubs WHERE logo IS NOT NULL AND logo != '';"
 
 # Get all logos from clubs table
-sqlite3 "$DB" "SELECT id, name, logo FROM clubs WHERE logo IS NOT NULL AND logo != '';" | while IFS='|' read -r id name logo; do
+sqlite3 "$DATABASE_NAME" "$QUERY" | while IFS='|' read -r id name logo; do
     # Skip if logo is empty
     if [ -z "$logo" ]; then
         continue
