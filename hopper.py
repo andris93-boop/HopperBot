@@ -18,7 +18,6 @@ LINE_UP_CHANNEL_ID = int(os.getenv('LINE_UP_CHANNEL_ID'))
 # Channel and role IDs for on-join behavior
 WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID'))
 NEWCOMER_ROLE_ID = int(os.getenv('NEWCOMER_ROLE_ID'))
-SET_CLUB_CHANNEL_ID = int(os.getenv('SET_CLUB_CHANNEL_ID'))
 LINE_UP_CHANNEL_ID = int(os.getenv('LINE_UP_CHANNEL_ID', 0))
 GROUNDHELP_CHANNEL_ID = int(os.getenv('GROUNDHELP_CHANNEL_ID', 0))
 GROUNDHOPPER_ROLE_ID = int(os.getenv('GROUNDHOPPER_ROLE_ID'))
@@ -541,7 +540,6 @@ async def on_member_join(member):
     welcome_channel = None
     for channel in guild.channels:
         try:
-            #if channel.id == WELCOME_CHANNEL_ID or channel.id == SET_CLUB_CHANNEL_ID:
             if channel.id == WELCOME_CHANNEL_ID:
                 welcome_channel = channel
                 # Allow visibility and messages in welcome channel
@@ -634,28 +632,6 @@ async def on_message(message):
                 return
         except Exception as e:
             print(f'Error in groundhelp handler: {e}')
-
-    # Check if message is in set-club or welcome channel
-    if message.channel.id == SET_CLUB_CHANNEL_ID or message.channel.id == WELCOME_CHANNEL_ID:
-        # Delete user message to keep channel clean
-        try:
-            await message.delete()
-        except:
-            pass
-
-        # Remind user to use slash command
-        reminder = await message.channel.send(
-            f"{message.author.mention} Please use the `/set-club` command to update your profile!"
-        )
-
-        # Delete reminder after 10 seconds
-        await asyncio.sleep(10)
-        try:
-            await reminder.delete()
-        except:
-            pass
-
-        return
 
     # Process commands
     await bot.process_commands(message)
