@@ -376,7 +376,7 @@ def get_user_level(user_id):
     elif active_days >= 2:
         return "Fan"
     else:
-        return ""
+        return "Casual"
 
 def get_user_activity_days(user_id):
     """Returns the total number of distinct active days for a user."""
@@ -876,8 +876,6 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
         tags_str = ', '.join(tags) if tags else 'No tags set'
         
         level = get_user_level(member.id)
-        if level == "":
-            level = "Inactive"
 
         embed = discord.Embed(title=f"Profile of {member.display_name} ({level})", color=discord.Color.blue())
         url = logo2URL(club_logo)
