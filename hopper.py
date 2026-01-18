@@ -22,12 +22,17 @@ LINE_UP_CHANNEL_ID = int(os.getenv('LINE_UP_CHANNEL_ID', 0))
 GROUNDHELP_CHANNEL_ID = int(os.getenv('GROUNDHELP_CHANNEL_ID', 0))
 GROUNDHOPPER_ROLE_ID = int(os.getenv('GROUNDHOPPER_ROLE_ID'))
 LOGO_URL = os.getenv('LOGO_URL')
-DATABASE_NAME = os.getenv('DATABASE_NAME', DATABASE_NAME)
+DATABASE_NAME = os.getenv('DATABASE_NAME')
+
+if not TOKEN or not DATABASE_NAME:
+    print("Error: DISCORD_TOKEN and DATABASE_NAME must be set in the .env file.")
+    exit(1)
 
 # Create bot with intents
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True  # Required to fetch members
+intents.reactions = True  # Required to receive reaction events
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 def logo2URL(logo_suffix):
@@ -485,6 +490,10 @@ async def post_member_list(guild, channel):
 
     print(f'Member list sent to channel {channel.name}.')
 
+@bot.command()
+async def ping(ctx):
+    await ctx.send(f'Yes, {ctx.author.mention}, I\'m here ! :robot: :saluting_face:')
+
 @bot.event
 async def on_ready():
     print(f'{bot.user} is logged in!')
@@ -635,6 +644,20 @@ async def on_message(message):
 
     # Process commands
     await bot.process_commands(message)
+
+@bot.event
+async def on_reaction_add(reaction, user):
+    """Handle reactions to messages."""
+    # Ignore bot reactions
+    if user.bot:
+        return
+    
+    print(f'Reaction added by {user} to message ID {reaction.message.id}')
+    # Increment activity counter for the user
+    try:
+        increment_activity(user.id)
+    except Exception as e:
+        print(f'Error incrementing activity on reaction: {e}')
 
 # Autocomplete functions
 async def country_autocomplete(interaction: discord.Interaction, current: str):
