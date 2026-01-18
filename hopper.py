@@ -11,7 +11,7 @@ import asyncio
 # Load environment variables from .env file
 load_dotenv()
 
-version = "1.0.0"
+version = "1.1.0"
 
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -256,6 +256,38 @@ def get_club_id_by_name(club_name):
 
     conn.close()
     return result[0] if result else None
+
+def get_club_info(club_name):
+    """Fetches club information including league and country."""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT c.name, l.name, l.country, c.logo, l.tier, l.flag, c.id
+        FROM clubs c
+        LEFT JOIN leagues l ON c.league_id = l.id
+        WHERE c.name = ?
+    ''', (club_name,))
+
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
+def get_members_by_club_id(guild_id, club_id):
+    """Fetches all members of a specific club in a guild."""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT user_id
+        FROM user_profiles
+        WHERE guild_id = ? AND club_id = ?
+        ORDER BY created_at
+    ''', (guild_id, club_id))
+
+    results = cursor.fetchall()
+    conn.close()
+    return results
 
 def update_club_league(club_id, league_id):
     """Updates the league_id of a club."""
@@ -960,6 +992,62 @@ async def add_tag_command(interaction: discord.Interaction, tags: str):
         f"**Your tags:** {', '.join(updated_tags)}",
         ephemeral=True
     )
+
+# Slash command: /club
+@bot.tree.command(name="club", description="Show club information and all members", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(club="The club name to display")
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
+async def club_command(interaction: discord.Interaction, 
+    country: str,
+    club: str):
+    """Shows club information and all members."""
+    await interaction.response.defer()
+    
+    # Get club information
+    club_info = get_club_info(club)
+    
+    if not club_info:
+        await interaction.followup.send(f"❌ Club '{club}' not found in database.", ephemeral=True)
+        return
+    
+    club_name = club_info[0]
+    league_name = club_info[1] if club_info[1] else 'Unknown'
+    country = club_info[2] if club_info[2] else 'Unknown'
+    club_logo = club_info[3]
+    tier = club_info[4] if club_info[4] else 99
+    flag = club_info[5] if club_info[5] else ''
+    club_id = club_info[6]
+    
+    # Get members of this club
+    guild = interaction.guild
+    members_data = get_members_by_club_id(guild.id, club_id)
+    
+    # Build member list with levels
+    member_mentions = []
+    for (user_id,) in members_data:
+        member = guild.get_member(user_id)
+        if member:
+            level = get_user_level(user_id)
+            member_mentions.append(f"{member.mention} {level}")
+    
+    # Create embed
+    embed = discord.Embed(
+        title=f"⚽ {club_name}",
+        description=f"**League:** {league_name} (Tier {tier})\n**Country:** {country} {flag}",
+        color=discord.Color.blue()
+    )
+    
+    url = logo2URL(club_logo)
+    if url:
+        embed.set_thumbnail(url=url)
+    
+    embed.add_field(
+        name=f"Members ({len(member_mentions)})",
+        value=", ".join(member_mentions) if member_mentions else "No members yet",
+        inline=False
+    )
+    
+    await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 # Start the bot
 bot.run(TOKEN)
