@@ -12,8 +12,7 @@ mkdir -p PNG
 DB="hopper_bot.db"
 
 # Get all logos from clubs table
-#sqlite3 "$DB" "SELECT id, name, logo FROM clubs WHERE logo IS NOT NULL AND logo != '';" | while IFS='|' read -r id name logo; do
-sqlite3 "$DB" "SELECT id, name, logo FROM clubs WHERE logo LIKE '%wikipedia%' ;" | while IFS='|' read -r id name logo; do
+sqlite3 "$DB" "SELECT id, name, logo FROM clubs WHERE logo IS NOT NULL AND logo != '';" | while IFS='|' read -r id name logo; do
     # Skip if logo is empty
     if [ -z "$logo" ]; then
         continue
@@ -43,7 +42,7 @@ sqlite3 "$DB" "SELECT id, name, logo FROM clubs WHERE logo LIKE '%wikipedia%' ;"
     echo "URL: $url"
     
     # Download with original filename
-    wget -q "$url"
+    wget -q -O "PNG/$file" "$url" 
     
     if [ $? -eq 0 ]; then
         echo "✓ Saved to PNG directory"
