@@ -397,7 +397,23 @@ def post_embeds(channel, msg, embeds):
                 await channel.send(embeds=embeds[i:i + 10], allowed_mentions=discord.AllowedMentions.none())
     return _post()
 
-async def post_member_list(guild, channel):
+def post_member_list(guild, channel):
+    """ checks if a memeber list is already posted and queues it if necessary."""
+    async def _post():
+        # Check if there's already a posting task running
+        if hasattr(bot, 'posting_task') and bot.posting_task and not bot.posting_task.done():
+            print('A member list posting is already in progress. Queuing the new request.')
+            # Wait for the existing task to finish
+            await bot.posting_task
+            print('Previous posting task completed. Starting the queued task.')
+
+        # Start a new posting task
+        bot.posting_task = asyncio.create_task(_post_member_list(guild, channel))
+        await bot.posting_task
+
+    return _post()
+
+async def _post_member_list(guild, channel):
     """Posts the member list sorted by country, league (by tier), and club to the specified channel."""
     # Delete all messages in the channel
     try:
@@ -497,6 +513,7 @@ async def post_member_list(guild, channel):
             if len(embeds) > 0:
                 await post_embeds(channel, msg, embeds)
 
+    await asyncio.sleep(10)  # To avoid hitting rate limits
     print(f'Member list sent to channel {channel.name}.')
 
 @bot.command()
