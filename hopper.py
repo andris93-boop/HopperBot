@@ -11,6 +11,8 @@ import asyncio
 # Load environment variables from .env file
 load_dotenv()
 
+version = "1.0.0"
+
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
 GUILD_ID = int(os.getenv('GUILD_ID'))
@@ -492,7 +494,7 @@ async def post_member_list(guild, channel):
 
 @bot.command()
 async def ping(ctx):
-    await ctx.send(f'Yes, {ctx.author.mention}, I\'m here ! :robot: :saluting_face:')
+    await ctx.send(f'Yes, {ctx.author.mention}, I\'m here ! :robot: :saluting_face: ({version})')
 
 @bot.event
 async def on_ready():
