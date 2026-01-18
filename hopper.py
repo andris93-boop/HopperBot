@@ -23,6 +23,7 @@ LINE_UP_CHANNEL_ID = int(os.getenv('LINE_UP_CHANNEL_ID', 0))
 GROUNDHELP_CHANNEL_ID = int(os.getenv('GROUNDHELP_CHANNEL_ID', 0))
 GROUNDHOPPER_ROLE_ID = int(os.getenv('GROUNDHOPPER_ROLE_ID'))
 LOGO_URL = os.getenv('LOGO_URL')
+DATABASE_NAME = os.getenv('DATABASE_NAME', DATABASE_NAME)
 
 # Create bot with intents
 intents = discord.Intents.default()
@@ -41,7 +42,7 @@ def logo2URL(logo_suffix):
 # Initialize database
 def init_database():
     """Creates the SQLite database and tables for user profiles and clubs."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     # Table for leagues
@@ -110,7 +111,7 @@ init_database()
 
 def get_or_create_league(name, country, tier=99):
     """Finds a league or creates it if it doesn't exist yet."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     # Check if league already exists
@@ -130,7 +131,7 @@ def get_or_create_league(name, country, tier=99):
 
 def get_or_create_club(name):
     """Finds a club or creates it if it doesn't exist yet."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     # Check if club already exists
@@ -152,7 +153,7 @@ def get_or_create_club(name):
 
 def save_user_profile(user_id, guild_id, club_id):
     """Saves the user profile to the database."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('''
@@ -166,7 +167,7 @@ def save_user_profile(user_id, guild_id, club_id):
 
 def get_user_profile(user_id, guild_id):
     """Loads the user profile from the database."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('''
@@ -184,7 +185,7 @@ def get_user_profile(user_id, guild_id):
 
 def get_leagues_by_country(country):
     """Fetches all leagues from a country from the database."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('SELECT name FROM leagues WHERE country = ? ORDER BY tier', (country,))
@@ -195,7 +196,7 @@ def get_leagues_by_country(country):
 
 def get_clubs_by_country_and_league(country, league):
     """Fetches all clubs from a country and league from the database."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('''
@@ -212,7 +213,7 @@ def get_clubs_by_country_and_league(country, league):
 
 def get_clubs_by_country(country):
     """Fetches all clubs from a country from the database."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('''
@@ -228,7 +229,7 @@ def get_clubs_by_country(country):
 
 def get_all_countries():
     """Fetches all countries from the database."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('SELECT DISTINCT country FROM leagues ORDER BY country')
@@ -239,7 +240,7 @@ def get_all_countries():
 
 def get_club_id_by_name(club_name):
     """Fetches the club ID by club name."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('SELECT id FROM clubs WHERE name = ?', (club_name,))
@@ -250,7 +251,7 @@ def get_club_id_by_name(club_name):
 
 def update_club_league(club_id, league_id):
     """Updates the league_id of a club."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('UPDATE clubs SET league_id = ? WHERE id = ?', (league_id, club_id))
@@ -259,7 +260,7 @@ def update_club_league(club_id, league_id):
 
 def update_league_tier(league_id, tier):
     """Updates the tier of a league."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('UPDATE leagues SET tier = ? WHERE id = ?', (tier, league_id))
@@ -268,7 +269,7 @@ def update_league_tier(league_id, tier):
 
 def get_user_tags(user_id):
     """Fetches all tags for a user."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('SELECT tag FROM tags WHERE user_id = ? ORDER BY created_at', (user_id,))
@@ -279,7 +280,7 @@ def get_user_tags(user_id):
 
 def save_user_tags(user_id, tags):
     """Saves tags for a user. Replaces existing tags."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     # Delete existing tags
@@ -295,7 +296,7 @@ def save_user_tags(user_id, tags):
 
 def add_user_tags(user_id, tags):
     """Adds tags to a user's existing tags."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     # Get existing tags to avoid duplicates
@@ -312,7 +313,7 @@ def add_user_tags(user_id, tags):
 
 def get_all_tags():
     """Fetches all unique tags from all users."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('SELECT DISTINCT tag FROM tags ORDER BY tag')
@@ -324,7 +325,7 @@ def get_all_tags():
 def increment_activity(user_id):
     """Increments the activity counter for a user for today."""
     from datetime import date
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     
     today = date.today()
@@ -343,7 +344,7 @@ def increment_activity(user_id):
 def get_user_level(user_id):
     """Calculates user level based on activity in the last 2 weeks."""
     from datetime import date, timedelta
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     
     today = date.today()
@@ -371,7 +372,7 @@ def get_user_level(user_id):
 
 def get_user_activity_days(user_id):
     """Returns the total number of distinct active days for a user."""
-    conn = sqlite3.connect('hopper_bot.db')
+    conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     cursor.execute('SELECT COUNT(DISTINCT date) FROM activity WHERE user_id = ?', (user_id,))
     active_days = cursor.fetchone()[0]
@@ -580,7 +581,7 @@ async def on_message(message):
             if matches:
                 guild = message.guild
                 notified = []
-                conn = sqlite3.connect('hopper_bot.db')
+                conn = sqlite3.connect(DATABASE_NAME)
                 cursor = conn.cursor()
                 for raw in matches:
                     query = raw.strip()
