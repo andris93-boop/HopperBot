@@ -1,0 +1,10 @@
+[Unit]
+Description=Hopper Bot Database Backup
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/hopper-bot
+ExecStart=/bin/bash %h/hopper-bot/backup.sh
+StandardOutput=journal
+StandardError=journal
