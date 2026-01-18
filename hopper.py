@@ -30,6 +30,8 @@ if not TOKEN or not DATABASE_NAME:
     print("Error: DISCORD_TOKEN and DATABASE_NAME must be set in the .env file.")
     exit(1)
 
+print(f"Starting Hopper Bot... (version {version}) on server ID {GUILD_ID} with database {DATABASE_NAME}")
+
 # Create bot with intents
 intents = discord.Intents.default()
 intents.message_content = True
@@ -415,6 +417,11 @@ async def post_member_list(guild, channel):
         if member.bot:
             continue  # Skip bots
         data = get_user_profile(member.id, guild.id)
+
+        club_name = None
+        country = None
+        league_name = None
+        tier = None
 
         if data and data[0]:
             club_name = data[0]

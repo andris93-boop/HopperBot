@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/hopper-bot
-ExecStart=/usr/bin/python3 %h/hopper-bot/hopper.py
+ExecStart=/usr/bin/python3 -u %h/hopper-bot/hopper.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
