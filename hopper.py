@@ -554,7 +554,11 @@ async def on_member_join(member):
 
     # Ask questions in the welcome channel
     if welcome_channel:
-        await welcome_channel.send(f"👋 Welcome {member.mention} to **{guild.name}**! Please use the `/set-club` command to set your home club.")
+        await welcome_channel.send(
+            f"👋 Welcome {member.mention} to **{guild.name}**! "
+            f"Please use the `/set-club` command to set your home club."
+            "If it does not exist yet, just enter its name "
+            "and it will be created automatically.")
 
     else:
         print(f'Welcome channel with ID {WELCOME_CHANNEL_ID} not found.')
