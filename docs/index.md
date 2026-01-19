@@ -52,6 +52,13 @@ this function will show the club and give following informations:
 - Country
 - Members (with activity status)
 
+## /set-clubicon
+This command allows you to set or update a club's logo by providing a direct image URL.
+- Select the country (drop-down) and the club (drop-down).
+- Paste the direct image link (PNG recommended) into the `logo_url` field.
+
+Note: SVG images are not supported and will be rejected. After a successful update the bot will display the club profile so you can verify the logo.
+
 ## /add-tags and /tags
 These commands allow you to manage tags on your profile.
 "/tags" deletes all your current tags and replaces them with the newly entered ones.
