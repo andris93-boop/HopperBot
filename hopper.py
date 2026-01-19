@@ -11,7 +11,7 @@ import asyncio
 # Load environment variables from .env file
 load_dotenv()
 
-version = "1.1.0"
+version = "1.3"
 
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -295,6 +295,15 @@ def update_club_league(club_id, league_id):
     cursor = conn.cursor()
 
     cursor.execute('UPDATE clubs SET league_id = ? WHERE id = ?', (league_id, club_id))
+    conn.commit()
+    conn.close()
+
+def update_club_logo(club_id, logo_url):
+    """Updates the logo URL of a club."""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute('UPDATE clubs SET logo = ? WHERE id = ?', (logo_url, club_id))
     conn.commit()
     conn.close()
 
@@ -1048,6 +1057,71 @@ async def club_command(interaction: discord.Interaction,
     )
     
     await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+# Slash command: /set-clubicon
+@bot.tree.command(name="set-clubicon", description="Set or update a club's logo (PNG recommended)", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(
+    country="The country of the club",
+    club="The club to update",
+    logo_url="The URL to the club logo (direct image link, PNG recommended)"
+)
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
+async def set_clubicon_command(
+    interaction: discord.Interaction,
+    country: str,
+    club: str,
+    logo_url: str
+):
+    """Set or update a club's logo URL.
+
+    The command will update the `logo` column for the selected club and then
+    display the club profile so you can verify the change.
+    """
+    await interaction.response.defer(ephemeral=True)
+
+    # Validate club exists
+    club_id = get_club_id_by_name(club)
+    if not club_id:
+        await interaction.followup.send(f"❌ Club '{club}' not found in the database.", ephemeral=True)
+        return
+
+    # Reject SVG files (not supported)
+    if logo_url.strip().lower().endswith('.svg'):
+        await interaction.followup.send("❌ .svg images are not supported. Please provide a PNG or JPG image URL.", ephemeral=True)
+        return
+
+    # Update the database
+    try:
+        update_club_logo(club_id, logo_url)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to update logo: {e}", ephemeral=True)
+        return
+
+    # Fetch updated info and show profile-like embed for verification
+    info = get_club_info(club)
+    if not info:
+        await interaction.followup.send(f"❌ Club '{club}' could not be loaded after update.", ephemeral=True)
+        return
+
+    club_name = info[0]
+    league_name = info[1] if info[1] else 'Unknown'
+    country_name = info[2] if info[2] else 'Unknown'
+    club_logo = info[3]
+    tier = info[4] if info[4] else 99
+    flag = info[5] if info[5] else ''
+
+    embed = discord.Embed(
+        title=f"⚽ {club_name}",
+        description=f"**League:** {league_name} (Tier {tier})\n**Country:** {country_name} {flag}",
+        color=discord.Color.blue()
+    )
+
+    url = logo2URL(club_logo)
+    if url:
+        embed.set_thumbnail(url=url)
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 # Start the bot
 bot.run(TOKEN)
