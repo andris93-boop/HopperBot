@@ -11,7 +11,7 @@ import asyncio
 # Load environment variables from .env file
 load_dotenv()
 
-version = "1.2.0"
+version = "1.3.0"
 
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -73,9 +73,16 @@ def init_database():
             league_id INTEGER,
             logo TEXT,
             flag TEXT,
+            color TEXT,
             FOREIGN KEY (league_id) REFERENCES leagues(id)
         )
     ''')
+
+    # Add color column if it doesn't exist (for existing databases)
+    cursor.execute("PRAGMA table_info(clubs)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if 'color' not in columns:
+        cursor.execute('ALTER TABLE clubs ADD COLUMN color TEXT')
 
     # Table for user profiles
     cursor.execute('''
@@ -179,7 +186,7 @@ def get_user_profile(user_id, guild_id):
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT c.name, l.country, up.created_at, c.logo, l.name, l.logo, l.tier, l.flag
+        SELECT c.name, l.country, up.created_at, c.logo, l.name, l.logo, l.tier, l.flag, c.color
         FROM user_profiles up
         LEFT JOIN clubs c ON up.club_id = c.id
         LEFT JOIN leagues l ON c.league_id = l.id
@@ -263,7 +270,7 @@ def get_club_info(club_name):
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT c.name, l.name, l.country, c.logo, l.tier, l.flag, c.id
+        SELECT c.name, l.name, l.country, c.logo, l.tier, l.flag, c.id, c.color
         FROM clubs c
         LEFT JOIN leagues l ON c.league_id = l.id
         WHERE c.name = ?
@@ -304,6 +311,15 @@ def update_club_logo(club_id, logo_url):
     cursor = conn.cursor()
 
     cursor.execute('UPDATE clubs SET logo = ? WHERE id = ?', (logo_url, club_id))
+    conn.commit()
+    conn.close()
+
+def update_club_color(club_id, color):
+    """Updates the color of a club."""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute('UPDATE clubs SET color = ? WHERE id = ?', (color, club_id))
     conn.commit()
     conn.close()
 
@@ -454,6 +470,8 @@ def post_member_list(guild, channel):
 
     return _post()
 
+default_color = discord.Color.blue()
+
 async def _post_member_list(guild, channel):
     """Posts the member list sorted by country, league (by tier), and club to the specified channel."""
     # Delete all messages in the channel
@@ -469,6 +487,7 @@ async def _post_member_list(guild, channel):
     league_tiers = {}  # Format: {(country, league_name): tier}
     flags = {}  # Format: {country: flag}
     levels = {}  # Format: {member_id: level}
+    colors = {}  # Format: {club_name: color}
 
     for member in guild.members:
         if member.bot:
@@ -492,6 +511,11 @@ async def _post_member_list(guild, channel):
                 if data[7]:
                     flags[country] = data[7]
                 tier = data[6]
+                if data[8]:
+                    try:
+                        colors[club_name] = discord.Color(int(data[8], 16))
+                    except ValueError:
+                        colors[club_name] = default_color
         
         club_name = club_name or 'Unknown'
         country = country or 'Unknown'
@@ -541,7 +565,7 @@ async def _post_member_list(guild, channel):
                 # Create embed with club logo
                 embed = discord.Embed(
                     description=", ".join(members),
-                    color=discord.Color.green()
+                    color=colors.get(club, default_color)
                 )
                 url = logo2URL(logos.get(club, ''))
                 if url:
@@ -927,6 +951,7 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
         club[2] = profile[7] if len(profile) > 7 and profile[7] else profile[1]
         created_at = profile[2]
         club_logo = profile[3] if len(profile) > 3 and profile[3] else None
+        color = discord.Color(int(profile[8], 16)) if len(profile) > 8 and profile[8] else default_color
         
         club_text = " - ".join(club)
         # Get user tags
@@ -935,7 +960,7 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
         
         level = get_user_level(member.id)
 
-        embed = discord.Embed(title=f"Profile of {member.display_name} ({level})", color=discord.Color.blue())
+        embed = discord.Embed(title=f"Profile of {member.display_name} ({level})", color=color)
         url = logo2URL(club_logo)
         if url:
             embed.set_thumbnail(url=url)
@@ -1029,7 +1054,9 @@ async def show_club_info(interaction: discord.Interaction, club: str):
     tier = club_info[4] if club_info[4] else 99
     flag = club_info[5] if club_info[5] else ''
     club_id = club_info[6]
+    color = discord.Color(int(club_info[7], 16)) if club_info[7] else default_color
     
+    print(f"Showing info for club '{club_name}' (ID: {club_id}) with color {color} and logo {club_logo}")
     # Get members of this club
     guild = interaction.guild
     members_data = get_members_by_club_id(guild.id, club_id)
@@ -1046,7 +1073,7 @@ async def show_club_info(interaction: discord.Interaction, club: str):
     embed = discord.Embed(
         title=f"⚽ {club_name}",
         description=f"**League:** {league_name} (Tier {tier})\n**Country:** {country} {flag}",
-        color=discord.Color.blue()
+        color=color
     )
     
     url = logo2URL(club_logo)
@@ -1099,6 +1126,48 @@ async def set_clubicon_command(
         update_club_logo(club_id, logo_url)
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to update logo: {e}", ephemeral=True)
+        return
+
+    await show_club_info(interaction, club)
+
+# Slash command: /set-clubcolor
+@bot.tree.command(name="set-clubcolor", description="Set or update a club's color (hex format)", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(
+    country="The country of the club",
+    club="The club to update",
+    color="The color in hex format (e.g. FF0000 for red, without #)"
+)
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
+async def set_clubcolor_command(
+    interaction: discord.Interaction,
+    country: str,
+    club: str,
+    color: str
+):
+    """Set or update a club's color.
+
+    The command will update the `color` column for the selected club and then
+    display the club profile so you can verify the change.
+    """
+    await interaction.response.defer(ephemeral=True)
+
+    # Validate club exists
+    club_id = get_club_id_by_name(club)
+    if not club_id:
+        await interaction.followup.send(f"❌ Club '{club}' not found in the database.", ephemeral=True)
+        return
+
+    # Validate hex color format
+    color = color.strip().lstrip('#').upper()
+    if len(color) != 6 or not all(c in '0123456789ABCDEF' for c in color):
+        await interaction.followup.send("❌ Invalid color format. Please provide a 6-digit hex color (e.g. FF0000 for red).", ephemeral=True)
+        return
+
+    # Update the database
+    try:
+        update_club_color(club_id, color)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to update color: {e}", ephemeral=True)
         return
 
     await show_club_info(interaction, club)
