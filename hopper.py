@@ -186,17 +186,15 @@ def get_user_profile(user_id, guild_id):
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT c.name, l.country, up.created_at, c.logo, l.name, l.logo, l.tier, l.flag, c.color
-        FROM user_profiles up
-        LEFT JOIN clubs c ON up.club_id = c.id
-        LEFT JOIN leagues l ON c.league_id = l.id
-        WHERE up.user_id = ? AND up.guild_id = ?
+        SELECT club_id, created_at FROM user_profiles
+        WHERE user_id = ? AND guild_id = ?
     ''', (user_id, guild_id))
 
     result = cursor.fetchone()
     conn.close()
-
-    return result
+    if not result:
+        return None, None
+    return result[0], result[1]
 
 def get_leagues_by_country(country):
     """Fetches all leagues from a country from the database."""
@@ -264,21 +262,36 @@ def get_club_id_by_name(club_name):
     conn.close()
     return result[0] if result else None
 
-def get_club_info(club_name):
+def get_club_info(club_id):
     """Fetches club information including league and country."""
+    if not club_id:
+        return None
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT c.name, l.name, l.country, c.logo, l.tier, l.flag, c.id, c.color
+        SELECT c.name, l.name, l.country, c.logo, l.tier, l.flag, c.id, c.color, l.logo
         FROM clubs c
         LEFT JOIN leagues l ON c.league_id = l.id
-        WHERE c.name = ?
-    ''', (club_name,))
+        WHERE c.id = ?
+    ''', (club_id,))
 
     result = cursor.fetchone()
     conn.close()
-    return result
+    if not result:
+        return None
+    data = {}
+    data["name"] = result[0] if result[0] else 'Unknown'
+    data["league"] = result[1] if result[1] else 'Unknown'
+    data["country"] = result[2] if result[2] else 'Unknown'
+    data["club_logo"] = logo2URL(result[3]) if result[3] else ''
+    data["tier"] = result[4] if result[4] else 99
+    data["flag"] = result[5] if result[5] else ''
+    data["club_id"] = result[6]
+    data["color"] = discord.Color(int(result[7], 16)) if result[7] else default_color
+    data["league_logo"] = logo2URL(result[8]) if result[8] else ''
+    data["no_league"] = not result[1] or not result[2]
+    return data
 
 def get_members_by_club_id(guild_id, club_id):
     """Fetches all members of a specific club in a guild."""
@@ -435,6 +448,21 @@ def get_user_level(user_id):
     else:
         return "Casual"
 
+def get_club_ids_sorted_by_country_and_tier():
+    """Returns a list of club IDs sorted by country and league tier."""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT c.id FROM clubs AS c
+        LEFT JOIN leagues AS l
+        ON c.league_id = l.id
+        WHERE l.country IS NOT NULL
+        ORDER BY l.country, l.tier
+    ''')
+    results = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return results
+
 def get_user_activity_days(user_id):
     """Returns the total number of distinct active days for a user."""
     conn = sqlite3.connect(DATABASE_NAME)
@@ -443,6 +471,15 @@ def get_user_activity_days(user_id):
     active_days = cursor.fetchone()[0]
     conn.close()
     return active_days
+
+def embed_for_club(club: dict):
+    """Creates a Discord embed for a club."""
+    embed = discord.Embed(
+        color=club['color']
+    )
+    if club['club_logo'] != "":
+        embed.set_thumbnail(url=club['club_logo'])
+    return embed
 
 def post_embeds(channel, msg, embeds):
     """Posts a list of embeds to the specified channel, handling Discord's limit of 10 embeds per message."""
@@ -489,101 +526,68 @@ async def _post_member_list(guild):
         print(f'Error deleting messages: {e}')
 
     # Group members by country, league, and club with league tier information
-    countries = {}  # Format: {country: {league_name: {'tier': int, 'clubs': {club_name: [members]}}}}
-    logos = {}  # Format: {club_name: logo_url}
-    league_tiers = {}  # Format: {(country, league_name): tier}
-    flags = {}  # Format: {country: flag}
-    levels = {}  # Format: {member_id: level}
-    colors = {}  # Format: {club_name: color}
+    clubs = {}  # Cache club info
+    no_league_clubs = set()
 
     for member in guild.members:
         if member.bot:
             continue  # Skip bots
-        data = get_user_profile(member.id, guild.id)
+        club_id, _ = get_user_profile(member.id, guild.id)
+        if not club_id:
+            continue  # Skip members without a club
+        if club_id not in clubs:
+            club = get_club_info(club_id)
+            if not club:
+                continue
+            clubs[club_id] = club
+            if club["no_league"]:
+                no_league_clubs.add(club_id)
 
-        club_name = None
-        country = None
-        league_name = None
-        tier = None
-
-        if data and data[0]:
-            club_name = data[0]
-            country = data[1]
-            if len(data) > 7:
-                league_name = data[4]
-                if data[3]:
-                    logos[club_name] = data[3]
-                if data[5]:
-                    logos[league_name] = data[5]
-                if data[7]:
-                    flags[country] = data[7]
-                tier = data[6]
-                if data[8]:
-                    try:
-                        colors[club_name] = discord.Color(int(data[8], 16))
-                    except ValueError:
-                        colors[club_name] = default_color
-        
-        club_name = club_name or 'Unknown'
-        country = country or 'Unknown'
-        league_name = league_name or 'Unknown'
-        flags[country] = flags.get(country, '')
-        tier = tier or 99
-
-        entry = f'{member.mention} {get_user_level(member.id)}'
-
-        league_tiers[(country, league_name)] = tier
-
-        # Group by country, league, and club
-        if country not in countries:
-            countries[country] = {}
-        if league_name not in countries[country]:
-            countries[country][league_name] = {'tier': tier, 'clubs': {}}
-        if club_name not in countries[country][league_name]['clubs']:
-            countries[country][league_name]['clubs'][club_name] = []
-        countries[country][league_name]['clubs'][club_name].append(entry)
+        club = clubs[club_id]
+        if not "members" in club:
+            club["members"] = []
+        club["members"].append(f'{member.mention} {get_user_level(member.id)}')
 
     # Send header message
     await channel.send(f"**Server: {guild.name}**\n**Number of members: {guild.member_count}**")
 
-    # Sort countries ('Unknown' last)
-    sorted_countries = sorted(countries.keys(), key=lambda s: (s == 'Unknown', s.lower()))
+    club_ids = get_club_ids_sorted_by_country_and_tier()
+    print(f'Total clubs: {len(club_ids)}, Total clubs with members: {len(clubs)}')
+    club_ids.extend(no_league_clubs - set(club_ids))
+    country = ""
+    league = ""
+    msg = ""
 
-    for country in sorted_countries:
-        await channel.send(f"═══ {country} {flags.get(country, '')} ═══\n")
+    embeds = []
+    for club_id in club_ids:
+        if not club_id in clubs:
+            continue
+        club = clubs[club_id]
 
-        # Sort leagues within the country by tier, then alphabetically ('Unknown' last)
-        sorted_leagues = sorted(
-            countries[country].items(),
-            key=lambda x: (x[0] == 'Unknown', x[1]['tier'], x[0].lower())
-        )
-
-        for league_name, league_data in sorted_leagues:
-            embeds = []
-            # Suche nach Name
-            msg = f"\n**{league_name}**\n"
-
-            # Sort clubs within the league ('Unknown' last)
-            sorted_clubs = sorted(league_data['clubs'].keys(), key=lambda s: (s == 'Unknown', s.lower()))
-
-            for club in sorted_clubs:
-                members = league_data['clubs'][club]
-
-                # Create embed with club logo
-                embed = discord.Embed(
-                    description=", ".join(members),
-                    color=colors.get(club, default_color)
-                )
-                url = logo2URL(logos.get(club, ''))
-                if url:
-                    embed.set_author(name=f"{club} ({len(members)})", icon_url=url)
-                else:
-                    embed.set_author(name=f"{club} ({len(members)})")
-
-                embeds.append(embed)
-
+        if club["league"] != league or club["country"] != country:
             if len(embeds) > 0:
                 await post_embeds(channel, msg, embeds)
+                embeds = []
+
+        print(f'COUNTRY {country} {club["country"]}')
+        if club["country"] != country:
+            country = club["country"]
+            await channel.send(f'═══ {country} {club["flag"]} ═══\n')
+
+        print(f'LEAGUE {country} {club["league"]}, {league}')
+        if club["league"] != league:
+            league = club["league"]
+            msg = f"\n**{league}**\n"
+
+        # Create embed with club logo
+        embed = embed_for_club(club)
+        embed.description = ", ".join(club["members"])
+        embed.set_author(name=f"{club['name']} ({len(club['members'])})")
+        embeds.append(embed)
+
+    if len(embeds) > 0:
+        await post_embeds(channel, msg, embeds)
+        embeds = []
 
     await asyncio.sleep(10)  # To avoid hitting rate limits
     print(f'Member list sent to channel {channel.name}.')
@@ -930,28 +934,22 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
 
     active_days = get_user_activity_days(member.id)
 
-    profile = get_user_profile(member.id, interaction.guild.id)
+    club_id, created_at = get_user_profile(member.id, interaction.guild.id)
+    if not club_id:
+        await interaction.response.send_message(f"No profile found for {member.display_name}.", ephemeral=True)
+        return
 
-    club = ["", "", ""]
-    if profile:
-        club[0] = profile[0] if profile[0] else 'Unknown'
-        club[1] = profile[4] if len(profile) > 4 and profile[4] else 'Unknown'
-        club[2] = profile[7] if len(profile) > 7 and profile[7] else profile[1]
-        created_at = profile[2]
-        club_logo = profile[3] if len(profile) > 3 and profile[3] else None
-        color = discord.Color(int(profile[8], 16)) if len(profile) > 8 and profile[8] else default_color
+    club = get_club_info(club_id)
+    if club:
+        club_text = " - ".join([club["name"], club["league"], club["flag"]])
         
-        club_text = " - ".join(club)
         # Get user tags
         tags = get_user_tags(member.id)
         tags_str = ', '.join(tags) if tags else 'No tags set'
-        
         level = get_user_level(member.id)
 
-        embed = discord.Embed(title=f"Profile of {member.display_name} ({level})", color=color)
-        url = logo2URL(club_logo)
-        if url:
-            embed.set_thumbnail(url=url)
+        embed = embed_for_club(club)
+        embed.title=f"{member.display_name} ({level})"
         embed.add_field(name="⚽ Home club", value=club_text , inline=False)
         embed.add_field(name="🏷️ Tags", value=tags_str, inline=False)
         embed.add_field(name="📅 Active days", value=str(active_days), inline=False)
@@ -1029,25 +1027,16 @@ async def club_command(interaction: discord.Interaction,
 
 async def show_club_info(interaction: discord.Interaction, club: str):
     # Get club information
-    club_info = get_club_info(club)
+    info = get_club_info(get_club_id_by_name(club))
     
-    if not club_info:
+    if not info:
         await interaction.followup.send(f"❌ Club '{club}' not found in database.", ephemeral=True)
         return
     
-    club_name = club_info[0]
-    league_name = club_info[1] if club_info[1] else 'Unknown'
-    country = club_info[2] if club_info[2] else 'Unknown'
-    club_logo = club_info[3]
-    tier = club_info[4] if club_info[4] else 99
-    flag = club_info[5] if club_info[5] else ''
-    club_id = club_info[6]
-    color = discord.Color(int(club_info[7], 16)) if club_info[7] else default_color
-    
-    print(f"Showing info for club '{club_name}' (ID: {club_id}) with color {color} and logo {club_logo}")
+    print(f"Showing info for club '{info['name']}' (ID: {info['club_id']}) with color {info['color']} and logo {info['club_logo']}")
     # Get members of this club
     guild = interaction.guild
-    members_data = get_members_by_club_id(guild.id, club_id)
+    members_data = get_members_by_club_id(guild.id, info['club_id'])
     
     # Build member list with levels
     member_mentions = []
@@ -1058,15 +1047,9 @@ async def show_club_info(interaction: discord.Interaction, club: str):
             member_mentions.append(f"{member.mention} {level}")
     
     # Create embed
-    embed = discord.Embed(
-        title=f"⚽ {club_name}",
-        description=f"**League:** {league_name} (Tier {tier})\n**Country:** {country} {flag}",
-        color=color
-    )
-    
-    url = logo2URL(club_logo)
-    if url:
-        embed.set_thumbnail(url=url)
+    embed = embed_for_club(info)
+    embed.title = f"⚽ {info['name']}"
+    embed.description = f"**League:** {info['league']} (Tier {info['tier']})\n**Country:** {info['country']} {info['flag']}"
     
     embed.add_field(
         name=f"Members ({len(member_mentions)})",
@@ -1075,7 +1058,6 @@ async def show_club_info(interaction: discord.Interaction, club: str):
     )
     
     await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-
 
 # Slash command: /set-clubicon
 @bot.tree.command(name="set-clubicon", description="Set or update a club's logo (PNG recommended)", guild=discord.Object(id=GUILD_ID))
