@@ -454,8 +454,8 @@ def post_embeds(channel, msg, embeds):
                 await channel.send(embeds=embeds[i:i + 10], allowed_mentions=discord.AllowedMentions.none())
     return _post()
 
-def post_member_list(guild, channel):
-    """ checks if a memeber list is already posted and queues it if necessary."""
+def post_member_list(guild):
+    """ checks if a member list is already posted and queues it if necessary."""
     async def _post():
         # Check if there's already a posting task running
         if hasattr(bot, 'posting_task') and bot.posting_task and not bot.posting_task.done():
@@ -465,15 +465,22 @@ def post_member_list(guild, channel):
             print('Previous posting task completed. Starting the queued task.')
 
         # Start a new posting task
-        bot.posting_task = asyncio.create_task(_post_member_list(guild, channel))
+        bot.posting_task = asyncio.create_task(_post_member_list(guild))
         await bot.posting_task
 
     return _post()
 
 default_color = discord.Color.blue()
 
-async def _post_member_list(guild, channel):
+async def _post_member_list(guild):
     """Posts the member list sorted by country, league (by tier), and club to the specified channel."""
+    # Find the channel
+    channel = bot.get_channel(LINE_UP_CHANNEL_ID)
+
+    if not channel:
+        print(f'Channel with ID {LINE_UP_CHANNEL_ID} not found.')
+        return
+
     # Delete all messages in the channel
     try:
         await channel.purge(limit=100)
@@ -603,15 +610,8 @@ async def on_ready():
         print(f'Server with ID {GUILD_ID} not found.')
         return
 
-    # Find the channel
-    channel = bot.get_channel(LINE_UP_CHANNEL_ID)
-
-    if not channel:
-        print(f'Channel with ID {LINE_UP_CHANNEL_ID} not found.')
-        return
-
     # Post the member list
-    await post_member_list(guild, channel)
+    await post_member_list(guild)
 
 @bot.event
 async def on_member_join(member):
@@ -862,13 +862,7 @@ async def set_club_command(
         except Exception as e:
             print(f'Error removing newcomer role from {member}: {e}')
 
-    # Update member list
-    lineup_channel = bot.get_channel(LINE_UP_CHANNEL_ID)
-    if lineup_channel:
-        try:
-            await post_member_list(guild, lineup_channel)
-        except Exception as e:
-            print(f'Error updating member list: {e}')
+    await post_member_list(guild)
 
     if league_id is None:
         await interaction.followup.send(
@@ -924,13 +918,7 @@ async def update_league_command(
     )
 
     # Update member list
-    guild = interaction.guild
-    lineup_channel = bot.get_channel(LINE_UP_CHANNEL_ID)
-    if lineup_channel:
-        try:
-            await post_member_list(guild, lineup_channel)
-        except Exception as e:
-            print(f'Error updating member list: {e}')
+    await post_member_list(interaction.guild)
 
 # Slash command: /profile
 @bot.tree.command(name="profile", description="Show a user's profile", guild=discord.Object(id=GUILD_ID))
