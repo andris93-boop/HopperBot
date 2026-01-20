@@ -11,7 +11,7 @@ import asyncio
 # Load environment variables from .env file
 load_dotenv()
 
-version = "1.1.0"
+version = "1.2.0"
 
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
