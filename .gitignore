@@ -1,0 +1,11 @@
+# Ignore environment files containing secrets
+*.env
+
+# Ignore backup environment files in backups directories
+backups
+
+# Local dbs
+*.db
+
+# Pycache
+__pycache__
