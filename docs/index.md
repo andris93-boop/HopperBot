@@ -59,6 +59,11 @@ This command allows you to set or update a club's logo by providing a direct ima
 
 Note: SVG images are not supported and will be rejected. After a successful update the bot will display the club profile so you can verify the logo.
 
+## /set-clubcolor
+This command allows to set a club's embed color so the club's messages and embeds use a custom color.
+- Select the country (drop-down) and the club (drop-down).
+- Provide a hex color value in the form `#RRGGBB` (e.g. `#FF4500`).
+
 ## /add-tags and /tags
 These commands allow you to manage tags on your profile.
 "/tags" deletes all your current tags and replaces them with the newly entered ones.
