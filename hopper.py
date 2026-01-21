@@ -529,24 +529,31 @@ async def _post_member_list(guild):
     clubs = {}  # Cache club info
     no_league_clubs = set()
 
+    def get_club(club_id):
+        if club_id not in clubs:
+            club = get_club_info(club_id)
+            if not club:
+                return None
+            clubs[club_id] = club
+            if club["no_league"]:
+                no_league_clubs.add(club_id)
+        return clubs[club_id]
+
     for member in guild.members:
         if member.bot:
             continue  # Skip bots
         club_id, _ = get_user_profile(member.id, guild.id)
-        if not club_id:
+        club = get_club(club_id)
+        if not club:
             continue  # Skip members without a club
-        if club_id not in clubs:
-            club = get_club_info(club_id)
-            if not club:
-                continue
-            clubs[club_id] = club
-            if club["no_league"]:
-                no_league_clubs.add(club_id)
 
-        club = clubs[club_id]
+        lvl = get_user_level(member.id)
         if not "members" in club:
             club["members"] = []
-        club["members"].append(f'{member.mention} {get_user_level(member.id)}')
+        club["members"].append(f'{member.mention} 🥇 {lvl}')
+
+    ### Iterate over expert-clubs - later
+    #    members_final.append(f"{member_obj.mention} 🥈 {lvl}")
 
     # Send header message
     await channel.send(f"**Server: {guild.name}**\n**Number of members: {guild.member_count}**")
