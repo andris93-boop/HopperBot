@@ -2,23 +2,23 @@
 
 ## Welcoming new members
 
-When a new member arrives on a server, the bot automatically assigns the role "newcomer". This role can only view the channel "Welcome". It sends a welcome message and asks the user to use the "/set-club" command to select a club. When that is done, the user is automatically given the role "Fan".
+When a new member arrives on a server, the bot automatically assigns the role "newcomer". This role can only view the channel "Welcome". It sends a welcome message and asks the user to use the "/set-club" command to select a club.
 
 ## Writing the line-up
 
-Every time the line-up changes, the bot automatically rewrites the line-up message. It mentions everyone with "@" but does not ping users with that message. It also adds the activity status (see: Tracking Activity Status) in the line-up message.
+Every time the line-up changes, the bot automatically rewrites the line-up message. It mentions everyone with "@" but does not ping users with that message. It also adds the activity status (see: [Tracking Activity Status](#tracking-activity-status)) in the line-up message.
 
 ATTENTION: The bot will rewrite the line-up message every time something changes. Because of the club icons being added as embeds (so it is not dependent on the server message limit), every club gets its own message, which can result in many messages. Please mute the "line-up" channel yourself, as this cannot be done from the server side.
+
+Clubs that appear only because at least one user marked them as an expert (no regular members) will still be shown in the lineup and will display their club logo if available. The bot appends a medal emoji after a user's mention to indicate their relation to the club: gold (🥇) for home club members, silver (🥈) for experts.
 
 ## Tracking Activity Status
 
 Every time a user sends a message, the bot counts it. The only data that is stored is: user ID, date, and number of entries. For assigning activity statuses, only the last two weeks are considered. Three different statuses can be achieved:
 
-- **Inactive:** messages on fewer than 2 different days
+- **Casual:** messages on fewer than 2 different days
 - **Fan:** at least 1 message on 2 different days
 - **Ultra:** at least 1 message on 5 different days
-
-The bot starts counting today, so the earliest you can achieve the "Fan" status is tomorrow; the "Ultra" status can be achieved earliest in four days.
 
 # Commands
 
@@ -26,7 +26,7 @@ The bot starts counting today, so the earliest you can achieve the "Fan" status 
 This command allows you to set or change your club.
 You will first be asked to select a country from a drop-down menu. If you cannot find your country, simply start typing to filter the list.
 Next, you can select a club from another drop-down menu. Again, you can type to filter the list.
-If your club does not exist yet, you can simply type the club’s name and it will be added automatically.
+If your club is not in our database yet, you can simply type the club’s name and it will be added automatically.
 
 ## /update-league
 If you create a new club, the bot will inform you that the club is not yet assigned to a league and will ask you to run this command.
@@ -56,6 +56,7 @@ This command shows the club and provides the following information:
 - name of the league,
 - country,
 - members (with activity status).
+- Experts for the club
 
 ## /set-clubicon
 This command allows you to set or update a club's logo by providing a direct image URL.
@@ -68,6 +69,14 @@ Note: SVG images are not supported and will be rejected. After a successful upda
 This command allows to set a club's embed color so the club's messages and embeds use a custom color.
 - Select the country (drop-down) and the club (drop-down).
 - Provide a hex color value in the form `#RRGGBB` (e.g. `#FF4500`).
+
+## Expert clubs (/add-expert-club, /remove-expert-club)
+These commands let users mark clubs they are an expert for (up to 4 clubs per user).
+- `/add-expert-club`: Select a country and a club to mark it as one you are an expert for.
+- `/remove-expert-club`: Remove a previously added expert club.
+
+Notes:
+- Expert clubs are limited to 4 entries per user. Expert clubs and expert users are already visible in user profiles, the server-wide lineup, and in the `/club` view under the "Experts" field.
 
 ## /add-tags and /tags
 These commands allow you to manage tags on your profile.

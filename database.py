@@ -85,6 +85,17 @@ class HopperDatabase:
             )
         ''')
 
+        # Table for expert clubs (users can mark up to 4 clubs as 'expert for')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS expert_clubs (
+                user_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                club_id INTEGER NOT NULL,
+                PRIMARY KEY (user_id, guild_id, club_id),
+                FOREIGN KEY (club_id) REFERENCES clubs(id)
+            )
+        ''')
+
         conn.commit()
         conn.close()
         print('Database initialized.')
@@ -131,7 +142,7 @@ class HopperDatabase:
         conn.close()
         return club_id, league_id
 
-    def save_user_profile(self, user_id, guild_id, club_id):
+    def save_user_profile(self, guild_id, user_id, club_id):
         """Saves the user profile to the database."""
         conn = sqlite3.connect(self.database_name)
         cursor = conn.cursor()
@@ -145,7 +156,7 @@ class HopperDatabase:
         conn.commit()
         conn.close()
 
-    def get_user_profile(self, user_id, guild_id):
+    def get_user_profile(self, guild_id, user_id):
         """Loads the user profile from the database."""
         conn = sqlite3.connect(self.database_name)
         cursor = conn.cursor()
@@ -428,3 +439,77 @@ class HopperDatabase:
         active_days = cursor.fetchone()[0]
         conn.close()
         return active_days
+
+    def add_expert_club(self, guild_id, user_id, club_id):
+        """Adds an expert club for a user. Returns (True, None) on success, (False, reason) on failure."""
+
+        home_club, _ = self.get_user_profile(guild_id, user_id)
+        if home_club == club_id:
+            return False, 'home_club'
+
+        conn = sqlite3.connect(self.database_name)
+        cursor = conn.cursor()
+
+        # Check if already exists
+        cursor.execute('SELECT 1 FROM expert_clubs WHERE guild_id = ? AND user_id = ? AND club_id = ?', (guild_id, user_id, club_id))
+        if cursor.fetchone():
+            conn.close()
+            return False, 'already_exists'
+
+        # Check limit
+        cursor.execute('SELECT COUNT(*) FROM expert_clubs WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
+        count = cursor.fetchone()[0]
+        if count >= 4:
+            conn.close()
+            return False, 'limit_reached'
+
+        # Insert
+        cursor.execute('INSERT INTO expert_clubs (user_id, guild_id, club_id) VALUES (?, ?, ?)', (user_id, guild_id, club_id))
+        conn.commit()
+        conn.close()
+        return True, None
+
+    def remove_expert_club(self, guild_id, user_id, club_id):
+        """Removes an expert club for a user. Returns True if removed, False otherwise."""
+        conn = sqlite3.connect(self.database_name)
+        cursor = conn.cursor()
+
+        cursor.execute('DELETE FROM expert_clubs WHERE guild_id = ? AND user_id = ? AND club_id = ?', (guild_id, user_id, club_id))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return deleted > 0
+
+    def get_expert_users_for_club(self, guild_id, club_id):
+        """Returns a list of user_ids who are experts for the given club in the guild."""
+        conn = sqlite3.connect(self.database_name)
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT user_id FROM expert_clubs WHERE guild_id = ? AND club_id = ?', (guild_id, club_id))
+        results = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return results
+
+    def get_expert_clubs(self, guild_id, user_id):
+        """Returns a list of club_ids the user is marked as expert for in the guild."""
+        conn = sqlite3.connect(self.database_name)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT c.name FROM expert_clubs e
+            LEFT JOIN clubs c ON e.club_id = c.id
+            WHERE e.guild_id = ? AND e.user_id = ?''', (guild_id, user_id))
+        results = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return results
+
+    def get_all_expert_clubs(self, guild_id):
+        """Returns a list of user_ids and club_ids the user is marked as expert for in the guild."""
+        conn = sqlite3.connect(self.database_name)
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT user_id, club_id FROM expert_clubs WHERE guild_id = ?', (guild_id,))
+        results = cursor.fetchall()
+        conn.close()
+        return results
+

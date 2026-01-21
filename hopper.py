@@ -145,23 +145,32 @@ async def _post_member_list(guild):
             clubs[club_id] = club
             if club["no_league"]:
                 no_league_clubs.add(club_id)
+            club["members"] = []
+            club["experts"] = []
         return clubs[club_id]
 
     for member in guild.members:
         if member.bot:
             continue  # Skip bots
-        club_id, _ = db.get_user_profile(member.id, guild.id)
+        club_id, _ = db.get_user_profile(guild.id, member.id)
         club = get_club(club_id)
         if not club:
             continue  # Skip members without a club
 
         lvl = db.get_user_level(member.id)
-        if not "members" in club:
-            club["members"] = []
         club["members"].append(f'{member.mention} 🥇 {lvl}')
 
-    ### Iterate over expert-clubs - later
-    #    members_final.append(f"{member_obj.mention} 🥈 {lvl}")
+    expert_data = db.get_all_expert_clubs(guild.id)
+    for (user_id, club_id) in expert_data:
+        member_obj = guild.get_member(user_id)
+        if not member_obj:
+            continue
+        club = get_club(club_id)
+        if not club:
+            continue
+
+        lvl = db.get_user_level(user_id)
+        club["experts"].append(f'{member_obj.mention} 🥈  {lvl}')
 
     # Send header message
     await channel.send(f"**Server: {guild.name}**\n**Number of members: {guild.member_count}**")
@@ -184,12 +193,10 @@ async def _post_member_list(guild):
                 await post_embeds(channel, msg, embeds)
                 embeds = []
 
-        print(f'COUNTRY {country} {club["country"]}')
         if club["country"] != country:
             country = club["country"]
             await channel.send(f'═══ {country} {club["flag"]} ═══\n')
 
-        print(f'LEAGUE {country} {club["league"]}, {league}')
         if club["league"] != league:
             league = club["league"]
             msg = f"\n**{league}**\n"
@@ -197,6 +204,9 @@ async def _post_member_list(guild):
         # Create embed with club logo
         embed = embed_for_club(club)
         embed.description = ", ".join(club["members"])
+        if "experts" in club and len(club["experts"]) > 0:
+            embed.add_field(name=f'Experts ({len(club["experts"])})',
+                value=", ".join(club["experts"]), inline=False)
         embed.set_author(name=f"{club['name']} ({len(club['members'])})")
         embeds.append(embed)
 
@@ -461,7 +471,7 @@ async def set_club_command(
     club_id, league_id = db.get_or_create_club(club)
 
     # Save profile
-    db.save_user_profile(member.id, guild.id, club_id)
+    db.save_user_profile(guild.id, member.id, club_id)
 
     await interaction.followup.send(
         f"✅ Your club has been updated!\n\n"
@@ -549,7 +559,7 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
 
     active_days = db.get_user_activity_days(member.id)
 
-    club_id, created_at = db.get_user_profile(member.id, interaction.guild.id)
+    club_id, created_at = db.get_user_profile(interaction.guild.id, member.id)
     if not club_id:
         await interaction.response.send_message(f"No profile found for {member.display_name}.", ephemeral=True)
         return
@@ -567,6 +577,10 @@ async def profile_command(interaction: discord.Interaction, member: discord.Memb
         embed.title=f"{member.display_name} ({level})"
         embed.add_field(name="⚽ Home club", value=club_text , inline=False)
         embed.add_field(name="🏷️ Tags", value=tags_str, inline=False)
+        # Expert clubs
+        expert_names = db.get_expert_clubs(interaction.guild.id, member.id)
+        expert_list = ', '.join(expert_names) if len(expert_names) > 0 else 'No experts known'
+        embed.add_field(name="Expert for", value=expert_list, inline=False)
         embed.add_field(name="📅 Active days", value=str(active_days), inline=False)
         embed.set_footer(text=f"Created on: {created_at}")
         await interaction.response.send_message(embed=embed)
@@ -652,7 +666,8 @@ async def show_club_info(interaction: discord.Interaction, club: str):
     # Get members of this club
     guild = interaction.guild
     members_data = db.get_members_by_club_id(guild.id, info['club_id'])
-    
+    member_ids = set(user_id for (user_id,) in members_data)
+
     # Build member list with levels
     member_mentions = []
     for (user_id,) in members_data:
@@ -671,6 +686,20 @@ async def show_club_info(interaction: discord.Interaction, club: str):
         value=", ".join(member_mentions) if member_mentions else "No members yet",
         inline=False
     )
+
+    # Add experts (without medal emojis). Exclude users already listed as members.
+    expert_user_ids = set(db.get_expert_users_for_club(guild.id, info['club_id'])) - member_ids
+    expert_mentions = []
+    for uid in expert_user_ids:
+        m = guild.get_member(uid)
+        if m:
+            expert_mentions.append(m.mention)
+    if len(expert_mentions) > 0:
+        embed.add_field(
+            name=f"Experts ({len(expert_mentions)})",
+            value=", ".join(expert_mentions),
+            inline=False
+        )
     
     await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
@@ -756,6 +785,67 @@ async def set_clubcolor_command(
         return
 
     await show_club_info(interaction, club)
+
+# Slash command: /add-expert-club
+@bot.tree.command(name="add-expert-club", description="Mark a club as one you are an expert for (max 4)", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(
+    country="The country your expert club is from",
+    club="The club name"
+)
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
+async def add_expert_club_command(interaction: discord.Interaction, country: str, club: str):
+    await interaction.response.defer(ephemeral=True)
+
+    member = interaction.user
+    guild = interaction.guild
+
+    club_id, _ = db.get_or_create_club(club)
+
+    ok, reason = db.add_expert_club(guild.id, member.id, club_id)
+    if not ok:
+        if reason == 'already_exists':
+            await interaction.followup.send(f"ℹ️ You already marked '{club}' as an expert club.", ephemeral=True)
+            return
+        if reason == 'limit_reached':
+            await interaction.followup.send("❌ You can mark up to 4 expert clubs. Remove one first.", ephemeral=True)
+            return
+        if reason == 'home_club':
+            await interaction.followup.send("❌ You are implicitly an expert for your home club and cannot add it as an expert club.", ephemeral=True)
+            return
+        await interaction.followup.send("❌ Could not add expert club.", ephemeral=True)
+        return
+
+    await interaction.followup.send(f"✅ Added '{club}' to your expert clubs.", ephemeral=True)
+
+    # Update member list
+    await post_member_list(interaction.guild)
+
+# Slash command: /remove-expert-club
+@bot.tree.command(name="remove-expert-club", description="Remove a club from your expert list", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(
+    country="The country of the club",
+    club="The club name to remove"
+)
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
+async def remove_expert_club_command(interaction: discord.Interaction, country: str, club: str):
+    await interaction.response.defer(ephemeral=True)
+
+    member = interaction.user
+    guild = interaction.guild
+
+    club_id = db.get_club_id_by_name(club)
+    if not club_id:
+        await interaction.followup.send(f"❌ Club '{club}' not found.", ephemeral=True)
+        return
+
+    removed = db.remove_expert_club(guild.id, member.id, club_id)
+    if removed:
+        await interaction.followup.send(f"✅ Removed '{club}' from your expert clubs.", ephemeral=True)
+    else:
+        await interaction.followup.send(f"ℹ️ '{club}' was not in your expert clubs.", ephemeral=True)
+
+    # Update member list
+    await post_member_list(interaction.guild)
 
 # Start the bot
 bot.run(TOKEN)
