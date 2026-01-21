@@ -45,6 +45,10 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 default_color = discord.Color.blue()
 
+def nbsp(text):
+    """Replaces all regular spaces with non-breaking spaces."""
+    return text.replace(' ', '\u00A0')
+
 def logo2URL(logo_suffix):
     """Converts a logo suffix to a full URL."""
     if not logo_suffix:
@@ -158,7 +162,7 @@ async def _post_member_list(guild):
             continue  # Skip members without a club
 
         lvl = db.get_user_level(member.id)
-        club["members"].append(f'{member.mention} 🥇 {lvl}')
+        club["members"].append(nbsp(f'{member.mention} 🥇 {lvl}'))
 
     expert_data = db.get_all_expert_clubs(guild.id)
     for (user_id, club_id) in expert_data:
@@ -170,7 +174,7 @@ async def _post_member_list(guild):
             continue
 
         lvl = db.get_user_level(user_id)
-        club["experts"].append(f'{member_obj.mention} 🥈  {lvl}')
+        club["experts"].append(nbsp(f'{member_obj.mention} 🥈 {lvl}'))
 
     # Send header message
     await channel.send(f"**Server: {guild.name}**\n**Number of members: {guild.member_count}**")
