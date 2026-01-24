@@ -12,7 +12,7 @@ from database import HopperDatabase
 # Load environment variables from .env file
 load_dotenv()
 
-version = "1.4.0"
+version = "1.4.1"
 
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -287,9 +287,12 @@ async def on_member_join(member):
     if welcome_channel:
         await welcome_channel.send(
             f"👋 Welcome {member.mention} to **{guild.name}**! "
-            f"Please use the `/set-club` command to set your home club."
+            f"Please use the `/set-club` command to set your home club. "
             "If it does not exist yet, just enter its name "
-            "and it will be created automatically.")
+            "and it will be created automatically. "
+            "Please mute the line-up and bot-command channels "
+            "to avoid a notification overload. "
+            )
 
     else:
         print(f'Welcome channel with ID {WELCOME_CHANNEL_ID} not found.')
