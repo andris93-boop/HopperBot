@@ -12,7 +12,7 @@ from database import HopperDatabase
 # Load environment variables from .env file
 load_dotenv()
 
-version = "1.4.1"
+version = "1.5.0"
 
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
