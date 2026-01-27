@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import sqlite3
 from datetime import date, timedelta
-
+from unidecode import unidecode
 
 class HopperDatabase:
     """Database handler for the Hopper Bot."""
@@ -246,10 +246,12 @@ class HopperDatabase:
             limit: maximum number of results to return
         """
         conn = sqlite3.connect(self.database_name)
+        conn.create_function("unidecode", 1, unidecode)
+
         cursor = conn.cursor()
 
         pattern = f"%{query}%"
-        cursor.execute('SELECT id, name FROM clubs WHERE LOWER(name) LIKE LOWER(?) LIMIT ?', (pattern, limit))
+        cursor.execute('SELECT id, name FROM clubs WHERE unidecode(LOWER(name)) LIKE unidecode(LOWER(?)) LIMIT ?', (pattern, limit))
         results = cursor.fetchall()
         conn.close()
         return results
