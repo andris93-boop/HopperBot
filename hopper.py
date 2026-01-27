@@ -610,18 +610,34 @@ async def on_message(message):
                         except Exception:
                             preview.add_field(name=f'Users to be pinged ({len(limited)})', value='None', inline=False)
 
-                        view = ConfirmPingView(author=message.author, channel=message.channel, mentions=limited, public_embed=embed, allowed_mentions=allowed, matched_query=matched_query)
+                        # If fewer than 3 users will be pinged, send immediately without confirmation
+                        if len(unique) < 3:
+                            try:
+                                content = ' '.join(m.mention for m in limited)
+                                sent = await message.channel.send(content=content, embed=embed, allowed_mentions=allowed)
+                                # optionally create thread
+                                if CREATE_THREAD_ON_PING and matched_query:
+                                    try:
+                                        thread = await sent.create_thread(name=f'Groundhelp: {matched_query}', auto_archive_duration=1440)
+                                        print(f'Groundhelp: created thread id={getattr(thread, "id", None)}')
+                                    except Exception as e:
+                                        print(f'Could not create thread after immediate send: {e}')
+                            except Exception as e:
+                                print(f'Error sending immediate groundhelp mentions: {e}')
+                                await message.channel.send('Fehler beim direkten Senden der Groundhelp-Nachricht.')
+                        else:
+                            view = ConfirmPingView(author=message.author, channel=message.channel, mentions=limited, public_embed=embed, allowed_mentions=allowed, matched_query=matched_query)
 
-                        try:
-                            # Send a short DM header and the embed (embed already contains the message preview)
-                            dm_text = 'Message Preview:'
-                            await message.author.send(content=dm_text, embed=preview, view=view)
-                        except Exception as e:
-                            # Could not send DM (privacy settings); fallback: send temporary preview in channel (visible) then continue
-                            print(f'Could not DM preview: {e}; sending temporary preview in channel')
-                            temp_header = f'{message.author.mention} Message Preview:'
-                            temp = await message.channel.send(f'{temp_header}', embed=preview)
-                            await temp.delete(delay=20)
+                            try:
+                                # Send a short DM header and the embed (embed already contains the message preview)
+                                dm_text = 'Message Preview:'
+                                await message.author.send(content=dm_text, embed=preview, view=view)
+                            except Exception as e:
+                                # Could not send DM (privacy settings); fallback: send temporary preview in channel (visible) then continue
+                                print(f'Could not DM preview: {e}; sending temporary preview in channel')
+                                temp_header = f'{message.author.mention} Message Preview:'
+                                temp = await message.channel.send(f'{temp_header}', embed=preview)
+                                await temp.delete(delay=20)
 
                     except Exception as e:
                         print(f'Error preparing preview/confirmation: {e}')
