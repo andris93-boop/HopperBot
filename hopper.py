@@ -364,16 +364,23 @@ async def on_message(message):
         try:
             content = message.content
             import re
-            # Match $ followed by club name (allow spaces, stop at newline or punctuation). Minimum length 3
-            matches = re.findall(r'\$([^\n!?\.,;:]{3,})', content)
+            # Match $ followed by club name (allow spaces, stop at newline, punctuation or next $). Minimum length 3
+            matches = re.findall(r'\$([^\n!?\.,;:\$]{3,})', content)
             if matches:
                 guild = message.guild
                 print(f'Groundhelp: matches={matches} from={message.author} channel={getattr(message.channel, "name", message.channel.id)}')
                 notified = []
                 notified_expert_ids = set()
                 matched_query = None
-                club_display_name = None
+                club_display_names = []
+                token_to_name = {}
+                info = None
                 club_logo_url = None
+                club_ids = []
+                league_names = set()
+                league_list = []
+                league_logo_map = {}
+                league_logo_candidate = None
                 for raw in matches:
                     query = raw.strip()
                     if not query:
@@ -406,9 +413,34 @@ async def on_message(message):
                     # fetch display name and logo from DB if possible
                     info = db.get_club_info(club_id)
                     if info and info[0]:
-                        club_display_name = info[0]
+                        if info[0] not in club_display_names:
+                            club_display_names.append(info[0])
+                        token_to_name[query] = info[0]
+                        try:
+                            club_ids.append(club_id)
+                            # league name at index 1, league logo at index 8 (if present)
+                            league_name = info[1] if len(info) > 1 else None
+                            if league_name:
+                                league_names.add(league_name)
+                                league_list.append(league_name)
+                            # store per-league logo candidate if present
+                            if len(info) > 8 and info[8]:
+                                try:
+                                    if league_name and league_name not in league_logo_map:
+                                        league_logo_map[league_name] = info[8]
+                                except Exception:
+                                    pass
+                            # fallback first-seen candidate (kept for compatibility)
+                            if len(info) > 8 and info[8] and not league_logo_candidate:
+                                league_logo_candidate = info[8]
+                        except Exception:
+                            pass
+                    else:
+                        token_to_name[query] = None
                     if info and len(info) > 3 and info[3]:
-                        club_logo_url = logo2URL(info[3])
+                        # prefer first club logo if multiple
+                        if not club_logo_url:
+                            club_logo_url = logo2URL(info[3])
                     for (uid,) in members_data:
                         member = guild.get_member(uid)
                         if member:
@@ -449,7 +481,7 @@ async def on_message(message):
                             unique = expert_members
                         else:
                             # Club exists but truly no active members in this guild
-                            name_to_show = club_display_name or matched_query
+                            name_to_show = (club_display_names[0] if club_display_names else matched_query)
                             # Build and show club profile embed with 0 members
                             club_dict = format_club_info(info) if info else None
                             if club_dict:
@@ -480,8 +512,9 @@ async def on_message(message):
                     limited = unique[:MAX_MENTIONS]
                     mentions = ' '.join(m.mention for m in limited)
                     allowed = discord.AllowedMentions(users=True)
-                    # Use the DB club name in the embed title when available
-                    embed_title = f'Groundhelp Anfrage — {club_display_name}' if club_display_name else 'Groundhelp Anfrage'
+                    # Use the DB club name(s) in the embed title when available
+                    combined_club_name = ', '.join(club_display_names) if club_display_names else None
+                    embed_title = f'Groundhelp Anfrage — {combined_club_name}' if combined_club_name else 'Groundhelp Anfrage'
                     # Determine embed color from DB if available
                     club_color = discord.Color.orange()
                     try:
@@ -497,10 +530,18 @@ async def on_message(message):
                     except Exception:
                         club_color = discord.Color.orange()
 
-                    # Build embed description: remove all $club tokens from the original message
+                    # Build embed description: replace $club tokens inline with DB names when available
                     try:
-                        # remove any $token like $Arminia or $Fere (robust pattern)
-                        desc = re.sub(r'\$[^\s!?\.,;:]{1,}', '', content)
+                        desc = content
+                        for raw_token in matches:
+                            if raw_token:
+                                name = token_to_name.get(raw_token)
+                                if name:
+                                    # replace only first occurrence
+                                    desc = re.sub(r'\$' + re.escape(raw_token), name, desc, count=1)
+                                else:
+                                    # remove the token if no match
+                                    desc = re.sub(r'\$' + re.escape(raw_token), '', desc, count=1)
                         # collapse whitespace and strip
                         desc = re.sub(r'\s+', ' ', desc).strip()
                         if not desc:
@@ -508,6 +549,32 @@ async def on_message(message):
                     except Exception:
                         desc = message.content
 
+                    # Decide on thumbnail: prefer a league logo when a majority of referenced clubs share one league
+                    try:
+                        chosen_league = None
+                        if len(club_ids) > 1 and len(league_list) > 0:
+                            # count occurrences per league
+                            counts = {}
+                            for ln in league_list:
+                                counts[ln] = counts.get(ln, 0) + 1
+                            # find most common league
+                            most_common_league = max(counts.items(), key=lambda x: x[1]) if counts else (None, 0)
+                            league_name, league_count = most_common_league
+                            # require strict majority (> half) or at least 2 clubs
+                            if league_name and league_count >= 2 and league_name in league_logo_map and league_logo_map[league_name]:
+                                club_logo_url = logo2URL(league_logo_map[league_name])
+                                chosen_league = league_name
+                            # else, keep first-seen club logo (club_logo_url)
+                    except Exception:
+                        chosen_league = None
+
+                    # DEBUG: show collected club/league info and the thumbnail chosen
+                    try:
+                        print(f'Groundhelp DEBUG: club_ids={club_ids} league_names={list(league_names)} league_list={league_list} league_logo_map_keys={list(league_logo_map.keys())} chosen_league={chosen_league} league_logo_candidate={league_logo_candidate} club_logo_url={club_logo_url}')
+                    except Exception:
+                        pass
+
+                    # Use desc (with inline replacements) as embed description
                     embed = discord.Embed(title=embed_title, description=desc, color=club_color)
                     if club_logo_url:
                         try:
@@ -520,8 +587,8 @@ async def on_message(message):
                     # Send a private preview to the author with confirmation button
                     try:
                         # preview embed: include message content (without $ tokens) and a compact list of profiles
-                        # Embed title: show club display name (no 'Vorschau:' prefix)
-                        preview_title = club_display_name if club_display_name else 'Groundhelp Anfrage'
+                        # Embed title: show combined club name(s) (no 'Vorschau:' prefix)
+                        preview_title = combined_club_name if combined_club_name else 'Groundhelp Anfrage'
                         preview = discord.Embed(title=preview_title, description=desc, color=club_color)
                         if club_logo_url:
                             try:
