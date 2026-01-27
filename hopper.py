@@ -5,7 +5,6 @@ from discord import app_commands
 from discord.ext import commands
 import os
 from dotenv import load_dotenv
-import sqlite3
 import asyncio
 from datetime import datetime, timedelta, time as dtime
 from database import HopperDatabase
@@ -53,6 +52,56 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 default_color = discord.Color.blue()
 
+ # Maximum number of users to mention in a single groundhelp ping
+MAX_MENTIONS = 10
+# When True the bot will try to create a thread for the groundhelp request (requires permissions)
+CREATE_THREAD_ON_PING = False
+
+
+class ConfirmPingView(discord.ui.View):
+    def __init__(self, author, channel, mentions, public_embed, allowed_mentions, matched_query):
+        super().__init__(timeout=300)
+        self.author = author
+        self.channel = channel
+        self.mentions = mentions
+        self.public_embed = public_embed
+        self.allowed_mentions = allowed_mentions
+        self.matched_query = matched_query
+
+    @discord.ui.button(label='OK', style=discord.ButtonStyle.green)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message('Nur der ursprüngliche Autor kann bestätigen.', ephemeral=True)
+            return
+        # send public message
+        try:
+            content = ' '.join(m.mention for m in self.mentions)
+            sent = await self.channel.send(content=content, embed=self.public_embed, allowed_mentions=self.allowed_mentions)
+            await interaction.response.send_message('Nachricht wurde gesendet.', ephemeral=True)
+            # optionally create thread
+            if CREATE_THREAD_ON_PING and self.matched_query:
+                try:
+                    thread = await sent.create_thread(name=f'Groundhelp: {self.matched_query}', auto_archive_duration=1440)
+                    print(f'Groundhelp: created thread id={getattr(thread, "id", None)}')
+                except Exception as e:
+                    print(f'Could not create thread after confirm: {e}')
+        except Exception as e:
+            print(f'Error sending confirmed groundhelp mentions: {e}')
+            await interaction.response.send_message('Fehler beim Senden der Nachricht.', ephemeral=True)
+        # disable buttons
+        for child in list(self.children):
+            child.disabled = True
+        await interaction.message.edit(view=self)
+
+    @discord.ui.button(label='Abbrechen', style=discord.ButtonStyle.grey)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message('Nur der ursprüngliche Autor kann abbrechen.', ephemeral=True)
+            return
+        await interaction.response.send_message('Abgebrochen.', ephemeral=True)
+        for child in list(self.children):
+            child.disabled = True
+        await interaction.message.edit(view=self)
 def nbsp(text):
     """Replaces all regular spaces with non-breaking spaces."""
     return text.replace(' ', '\u00A0')
@@ -331,45 +380,111 @@ async def on_message(message):
     except Exception as e:
         print(f'Error incrementing activity: {e}')
 
-    # Groundhelp channel: detect !ClubName and notify matching members
+    # Groundhelp channel: detect $ClubName and notify matching members
     if message.channel.id == GROUNDHELP_CHANNEL_ID:
         try:
             content = message.content
             import re
-            matches = re.findall(r'$([^!\n?.!,;:]{5,})', content)
+            # Match $ followed by club name (allow spaces, stop at newline, punctuation or next $). Minimum length 3
+            matches = re.findall(r'\$([^\n!?\.,;:\$]{3,})', content)
             if matches:
                 guild = message.guild
+                print(f'Groundhelp: matches={matches} from={message.author} channel={getattr(message.channel, "name", message.channel.id)}')
                 notified = []
-                conn = sqlite3.connect(DATABASE_NAME)
-                cursor = conn.cursor()
+                notified_expert_ids = set()
+                matched_query = None
+                club_display_names = []
+                token_to_name = {}
+                info = None
+                club_logo_url = None
+                club_ids = []
+                league_names = set()
+                league_list = []
+                league_logo_map = {}
+                league_logo_candidate = None
+                had_error = False
                 for raw in matches:
                     query = raw.strip()
                     if not query:
                         continue
+                    matched_query = query
 
-                    # exact match (case-insensitive)
-                    cursor.execute('SELECT id, name FROM clubs WHERE LOWER(name) = LOWER(?)', (query,))
-                    rows = cursor.fetchall()
-                    if not rows:
-                        cursor.execute('SELECT id, name FROM clubs WHERE LOWER(name) LIKE LOWER(?)', (f'%{query}%',))
-                        rows = cursor.fetchall()
+                    # Prefer exact match via DB wrapper
+                    club_id = db.get_club_id_by_name(query)
+                    print(f'Groundhelp: lookup club "{query}" -> club_id={club_id}')
+                    if not club_id:
+                        # Try fuzzy search (LIKE)
+                        like_matches = db.search_clubs_by_name_like(query, limit=10)
+                        print(f'Groundhelp: like search for "{query}" -> {len(like_matches)} matches')
+                        if len(like_matches) == 0:
+                            # No club found at all
+                            await message.channel.send(f'{query} not found')
+                            had_error = True
+                            continue
+                        if len(like_matches) > 5:
+                            await message.channel.send(f'{query} matches too many clubs')
+                            had_error = True
+                            continue
+                        if len(like_matches) == 1:
+                            club_id = like_matches[0][0]
+                        else:
+                            # Multiple (but <=5) matches: ask user to be more specific
+                            names = ', '.join([m[1] for m in like_matches])
+                            await message.channel.send(f'{query} matches multiple clubs: {names}')
+                            had_error = True
+                            continue
 
-                    if not rows:
-                        continue
-
-                    club_ids = [r[0] for r in rows]
-                    # fetch user_ids for these clubs in this guild
-                    placeholders = ','.join('?' for _ in club_ids)
-                    params = (*club_ids, guild.id)
-                    cursor.execute(f'SELECT user_id FROM user_profiles WHERE club_id IN ({placeholders}) AND guild_id = ?', params)
-                    for (uid,) in cursor.fetchall():
+                    members_data = db.get_members_by_club_id(guild.id, club_id)
+                    # fetch display name and logo from DB if possible
+                    info = db.get_club_info(club_id)
+                    if info and info[0]:
+                        if info[0] not in club_display_names:
+                            club_display_names.append(info[0])
+                        token_to_name[query] = info[0]
+                        try:
+                            club_ids.append(club_id)
+                            # league name at index 1, league logo at index 8 (if present)
+                            league_name = info[1] if len(info) > 1 else None
+                            if league_name:
+                                league_names.add(league_name)
+                                league_list.append(league_name)
+                            # store per-league logo candidate if present
+                            if len(info) > 8 and info[8]:
+                                try:
+                                    if league_name and league_name not in league_logo_map:
+                                        league_logo_map[league_name] = info[8]
+                                except Exception:
+                                    pass
+                            # fallback first-seen candidate (kept for compatibility)
+                            if len(info) > 8 and info[8] and not league_logo_candidate:
+                                league_logo_candidate = info[8]
+                        except Exception:
+                            pass
+                    else:
+                        token_to_name[query] = None
+                    if info and len(info) > 3 and info[3]:
+                        # prefer first club logo if multiple
+                        if not club_logo_url:
+                            club_logo_url = logo2URL(info[3])
+                    for (uid,) in members_data:
                         member = guild.get_member(uid)
                         if member:
                             notified.append(member)
+                    print(f'Groundhelp: found {len(members_data)} members, appended {len(notified)} so far')
 
-                conn.close()
+                    # include experts for this club (exclude duplicates later)
+                    try:
+                        expert_user_ids = db.get_expert_users_for_club(guild.id, club_id)
+                        for uid in expert_user_ids:
+                            member = guild.get_member(uid)
+                            if member:
+                                notified.append(member)
+                                notified_expert_ids.add(uid)
+                        print(f'Groundhelp: added {len(expert_user_ids)} expert ids, total appended {len(notified)} so far')
+                    except Exception as e:
+                        print(f'Error fetching expert users for club {club_id}: {e}')
 
-                # uniq
+                # Deduplicate
                 unique = []
                 seen = set()
                 for m in notified:
@@ -377,14 +492,228 @@ async def on_message(message):
                         unique.append(m)
                         seen.add(m.id)
 
+                # If any token produced an error, do not ping anyone.
+                if had_error:
+                    try:
+                        # Show club profile for clubs that were resolved (no mentions)
+                        for cid in club_ids:
+                            try:
+                                info_c = db.get_club_info(cid)
+                                club_dict = format_club_info(info_c) if info_c else None
+                                members_data_c = db.get_members_by_club_id(guild.id, cid)
+                                member_names = []
+                                for (uid,) in members_data_c:
+                                    m = guild.get_member(uid)
+                                    if m:
+                                        member_names.append(m.display_name)
+                                expert_user_ids_c = db.get_expert_users_for_club(guild.id, cid)
+                                expert_names = []
+                                for uid in expert_user_ids_c:
+                                    m = guild.get_member(uid)
+                                    if m:
+                                        expert_names.append(m.display_name)
+
+                                if club_dict:
+                                    club_embed = embed_for_club(club_dict)
+                                    club_embed.title = f"⚽ {club_dict['name']}"
+                                    club_embed.description = f"**League:** {club_dict['league']} (Tier {club_dict['tier']})\n**Country:** {club_dict['country']} {club_dict['flag']}"
+                                    if member_names:
+                                        # show plain display names to avoid pings
+                                        club_embed.add_field(name=f"Members ({len(member_names)})", value=", ".join(member_names), inline=False)
+                                    else:
+                                        club_embed.add_field(name="Members (0)", value="No members", inline=False)
+                                    if expert_names:
+                                        club_embed.add_field(name=f"Experts ({len(expert_names)})", value=", ".join(expert_names), inline=False)
+                                    await message.channel.send(embed=club_embed, allowed_mentions=discord.AllowedMentions.none())
+                            except Exception as e:
+                                print(f'Error sending club profile for cid={cid}: {e}')
+                    except Exception as e:
+                        print(f'Error while aborting pings due to token errors: {e}')
+                    return
+
                 if not unique:
-                    await message.channel.send('Keine Mitglieder mit dem gesuchten Verein gefunden.')
+                    # No regular members found; check if there are experts to ping
+                    try:
+                        expert_user_ids = db.get_expert_users_for_club(guild.id, club_id)
+                        expert_members = []
+                        for uid in expert_user_ids:
+                            m = guild.get_member(uid)
+                            if m:
+                                expert_members.append(m)
+                        if expert_members:
+                            # use experts as recipients
+                            unique = expert_members
+                        else:
+                            # Club exists but truly no active members in this guild
+                            name_to_show = (club_display_names[0] if club_display_names else matched_query)
+                            # Build and show club profile embed with 0 members
+                            club_dict = format_club_info(info) if info else None
+                            if club_dict:
+                                try:
+                                    club_embed = embed_for_club(club_dict)
+                                    club_embed.title = f"⚽ {club_dict['name']}"
+                                    club_embed.description = f"**League:** {club_dict['league']} (Tier {club_dict['tier']})\n**Country:** {club_dict['country']} {club_dict['flag']}"
+                                    club_embed.add_field(name="Members (0)", value="No members", inline=False)
+                                    # experts (should be none here)
+                                    expert_user_ids = db.get_expert_users_for_club(guild.id, club_dict['club_id'])
+                                    expert_mentions = []
+                                    for uid in expert_user_ids:
+                                        m = guild.get_member(uid)
+                                        if m:
+                                            expert_mentions.append(m.mention)
+                                    if expert_mentions:
+                                        club_embed.add_field(name=f"Experts ({len(expert_mentions)})", value=", ".join(expert_mentions), inline=False)
+                                    await message.channel.send('No members', embed=club_embed)
+                                except Exception as e:
+                                    print(f'Error showing club profile for no-members case: {e}')
+                                    await message.channel.send(f'{name_to_show} has no active members')
+                            else:
+                                await message.channel.send(f'{name_to_show} has no active members')
+                    except Exception as e:
+                        print(f'Error checking experts for club {club_id}: {e}')
+                        await message.channel.send('No members')
                 else:
-                    mentions = ' '.join(m.mention for m in unique)
+                    limited = unique[:MAX_MENTIONS]
+                    mentions = ' '.join(m.mention for m in limited)
                     allowed = discord.AllowedMentions(users=True)
-                    embed = discord.Embed(title='Groundhelp Anfrage', description=message.content, color=discord.Color.orange())
+                    # Use the DB club name(s) in the embed title when available
+                    combined_club_name = ', '.join(club_display_names) if club_display_names else None
+                    embed_title = f'Groundhelp — {combined_club_name}' if combined_club_name else 'Groundhelp'
+                    # Determine embed color from DB if available
+                    club_color = discord.Color.orange()
+                    try:
+                        if info and len(info) > 7 and info[7]:
+                            raw = str(info[7]).strip()
+                            # remove leading # or 0x if present
+                            if raw.startswith('#'):
+                                raw = raw[1:]
+                            if raw.lower().startswith('0x'):
+                                raw = raw[2:]
+                            if len(raw) == 6 and all(c in '0123456789abcdefABCDEF' for c in raw):
+                                club_color = discord.Color(int(raw, 16))
+                    except Exception:
+                        club_color = discord.Color.orange()
+
+                    # Build embed description: replace $club tokens inline with DB names when available
+                    try:
+                        desc = content
+                        for raw_token in matches:
+                            if raw_token:
+                                name = token_to_name.get(raw_token)
+                                if name:
+                                    # replace only first occurrence
+                                    desc = re.sub(r'\$' + re.escape(raw_token), name, desc, count=1)
+                                else:
+                                    # remove the token if no match
+                                    desc = re.sub(r'\$' + re.escape(raw_token), '', desc, count=1)
+                        # collapse whitespace and strip
+                        desc = re.sub(r'\s+', ' ', desc).strip()
+                        if not desc:
+                            desc = message.content
+                    except Exception:
+                        desc = message.content
+
+                    # Decide on thumbnail: prefer a league logo when a majority of referenced clubs share one league
+                    try:
+                        chosen_league = None
+                        if len(club_ids) > 1 and len(league_list) > 0:
+                            # count occurrences per league
+                            counts = {}
+                            for ln in league_list:
+                                counts[ln] = counts.get(ln, 0) + 1
+                            # find most common league
+                            most_common_league = max(counts.items(), key=lambda x: x[1]) if counts else (None, 0)
+                            league_name, league_count = most_common_league
+                            # require strict majority (> half) or at least 2 clubs
+                            if league_name and league_count >= 2 and league_name in league_logo_map and league_logo_map[league_name]:
+                                club_logo_url = logo2URL(league_logo_map[league_name])
+                                chosen_league = league_name
+                            # else, keep first-seen club logo (club_logo_url)
+                    except Exception:
+                        chosen_league = None
+
+                    # DEBUG: show collected club/league info and the thumbnail chosen
+                    try:
+                        print(f'Groundhelp DEBUG: club_ids={club_ids} league_names={list(league_names)} league_list={league_list} league_logo_map_keys={list(league_logo_map.keys())} chosen_league={chosen_league} league_logo_candidate={league_logo_candidate} club_logo_url={club_logo_url}')
+                    except Exception:
+                        pass
+
+                    # Use desc (with inline replacements) as embed description
+                    embed = discord.Embed(title=embed_title, description=desc, color=club_color)
+                    if club_logo_url:
+                        try:
+                            embed.set_thumbnail(url=club_logo_url)
+                        except Exception:
+                            pass
+
+                    # Note: Recipients list removed from public embed to avoid duplicate mentions; mentions will appear in the message content
                     embed.set_author(name=message.author.display_name, icon_url=getattr(message.author.avatar, 'url', None) if hasattr(message.author, 'avatar') else None)
-                    await message.channel.send(content=mentions, embed=embed, allowed_mentions=allowed)
+                    # Send a private preview to the author with confirmation button
+                    try:
+                        # preview embed: include message content (without $ tokens) and a compact list of profiles
+                        # Embed title: show combined club name(s) (no 'Vorschau:' prefix)
+                        preview_title = combined_club_name if combined_club_name else 'Groundhelp Anfrage'
+                        preview = discord.Embed(title=preview_title, description=desc, color=club_color)
+                        if club_logo_url:
+                            try:
+                                preview.set_thumbnail(url=club_logo_url)
+                            except Exception:
+                                pass
+
+                        # Show users to be pinged (count in parentheses) and list them below with medal+status
+                        try:
+                            user_lines = []
+                            for m in limited:
+                                try:
+                                    lvl = db.get_user_level(m.id)
+                                except Exception:
+                                    lvl = ''
+                                medal = '🥈' if getattr(m, 'id', None) in notified_expert_ids else '🥇'
+                                user_lines.append(f"{m.mention} {medal} {lvl}")
+                            preview.add_field(name=f'Users to be pinged ({len(limited)})', value='\n'.join(user_lines) if user_lines else 'None', inline=False)
+                        except Exception:
+                            preview.add_field(name=f'Users to be pinged ({len(limited)})', value='None', inline=False)
+
+                        # If fewer than 3 users will be pinged, send immediately without confirmation
+                        if len(unique) < 3:
+                            try:
+                                content = ' '.join(m.mention for m in limited)
+                                sent = await message.channel.send(content=content, embed=embed, allowed_mentions=allowed)
+                                # optionally create thread
+                                if CREATE_THREAD_ON_PING and matched_query:
+                                    try:
+                                        thread = await sent.create_thread(name=f'Groundhelp: {matched_query}', auto_archive_duration=1440)
+                                        print(f'Groundhelp: created thread id={getattr(thread, "id", None)}')
+                                    except Exception as e:
+                                        print(f'Could not create thread after immediate send: {e}')
+                            except Exception as e:
+                                print(f'Error sending immediate groundhelp mentions: {e}')
+                                await message.channel.send('Fehler beim direkten Senden der Groundhelp-Nachricht.')
+                        else:
+                            view = ConfirmPingView(author=message.author, channel=message.channel, mentions=limited, public_embed=embed, allowed_mentions=allowed, matched_query=matched_query)
+
+                            try:
+                                # Send a short DM header and the embed (embed already contains the message preview)
+                                dm_text = 'Message Preview:'
+                                await message.author.send(content=dm_text, embed=preview, view=view)
+                            except Exception as e:
+                                # Could not send DM (privacy settings); fallback: send temporary preview in channel (visible) then continue
+                                print(f'Could not DM preview: {e}; sending temporary preview in channel')
+                                temp_header = f'{message.author.mention} Message Preview:'
+                                temp = await message.channel.send(f'{temp_header}', embed=preview)
+                                await temp.delete(delay=20)
+
+                    except Exception as e:
+                        print(f'Error preparing preview/confirmation: {e}')
+                        await message.channel.send('Fehler beim Erstellen der Vorschau.')
+                        return
+
+                    # Inform if we truncated the list (still inform the author via DM or fallback)
+                    if len(unique) > MAX_MENTIONS:
+                        try:
+                            await message.author.send(f'Es wurden {len(unique)} Mitglieder gefunden — nur die ersten {MAX_MENTIONS} werden nach Bestätigung erwähnt.')
+                        except Exception:
+                            await message.channel.send(f'Es wurden {len(unique)} Mitglieder gefunden — nur die ersten {MAX_MENTIONS} werden erwähnt.')
 
                 return
         except Exception as e:

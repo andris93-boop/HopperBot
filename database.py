@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import sqlite3
 from datetime import date, timedelta
-
+from unidecode import unidecode
 
 class HopperDatabase:
     """Database handler for the Hopper Bot."""
@@ -237,6 +237,24 @@ class HopperDatabase:
 
         conn.close()
         return result[0] if result else None
+
+    def search_clubs_by_name_like(self, query, limit=50):
+        """Search clubs by name using case-insensitive LIKE. Returns list of (id, name).
+
+        Args:
+            query: substring to search for
+            limit: maximum number of results to return
+        """
+        conn = sqlite3.connect(self.database_name)
+        conn.create_function("unidecode", 1, unidecode)
+
+        cursor = conn.cursor()
+
+        pattern = f"%{query}%"
+        cursor.execute('SELECT id, name FROM clubs WHERE unidecode(LOWER(name)) LIKE unidecode(LOWER(?)) LIMIT ?', (pattern, limit))
+        results = cursor.fetchall()
+        conn.close()
+        return results
 
     def get_club_info(self, club_id):
         """Fetches club information including league and country.
