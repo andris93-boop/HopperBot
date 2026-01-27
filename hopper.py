@@ -381,6 +381,7 @@ async def on_message(message):
                 league_list = []
                 league_logo_map = {}
                 league_logo_candidate = None
+                had_error = False
                 for raw in matches:
                     query = raw.strip()
                     if not query:
@@ -396,10 +397,12 @@ async def on_message(message):
                         print(f'Groundhelp: like search for "{query}" -> {len(like_matches)} matches')
                         if len(like_matches) == 0:
                             # No club found at all
-                            await message.channel.send('Club not found')
+                            await message.channel.send(f'{query} not found')
+                            had_error = True
                             continue
                         if len(like_matches) > 5:
                             await message.channel.send(f'{query} matches too many clubs')
+                            had_error = True
                             continue
                         if len(like_matches) == 1:
                             club_id = like_matches[0][0]
@@ -407,6 +410,7 @@ async def on_message(message):
                             # Multiple (but <=5) matches: ask user to be more specific
                             names = ', '.join([m[1] for m in like_matches])
                             await message.channel.send(f'{query} matches multiple clubs: {names}')
+                            had_error = True
                             continue
 
                     members_data = db.get_members_by_club_id(guild.id, club_id)
@@ -467,6 +471,45 @@ async def on_message(message):
                         unique.append(m)
                         seen.add(m.id)
 
+                # If any token produced an error, do not ping anyone.
+                if had_error:
+                    try:
+                        # Show club profile for clubs that were resolved (no mentions)
+                        for cid in club_ids:
+                            try:
+                                info_c = db.get_club_info(cid)
+                                club_dict = format_club_info(info_c) if info_c else None
+                                members_data_c = db.get_members_by_club_id(guild.id, cid)
+                                member_names = []
+                                for (uid,) in members_data_c:
+                                    m = guild.get_member(uid)
+                                    if m:
+                                        member_names.append(m.display_name)
+                                expert_user_ids_c = db.get_expert_users_for_club(guild.id, cid)
+                                expert_names = []
+                                for uid in expert_user_ids_c:
+                                    m = guild.get_member(uid)
+                                    if m:
+                                        expert_names.append(m.display_name)
+
+                                if club_dict:
+                                    club_embed = embed_for_club(club_dict)
+                                    club_embed.title = f"⚽ {club_dict['name']}"
+                                    club_embed.description = f"**League:** {club_dict['league']} (Tier {club_dict['tier']})\n**Country:** {club_dict['country']} {club_dict['flag']}"
+                                    if member_names:
+                                        # show plain display names to avoid pings
+                                        club_embed.add_field(name=f"Members ({len(member_names)})", value=", ".join(member_names), inline=False)
+                                    else:
+                                        club_embed.add_field(name="Members (0)", value="No members", inline=False)
+                                    if expert_names:
+                                        club_embed.add_field(name=f"Experts ({len(expert_names)})", value=", ".join(expert_names), inline=False)
+                                    await message.channel.send(embed=club_embed, allowed_mentions=discord.AllowedMentions.none())
+                            except Exception as e:
+                                print(f'Error sending club profile for cid={cid}: {e}')
+                    except Exception as e:
+                        print(f'Error while aborting pings due to token errors: {e}')
+                    return
+
                 if not unique:
                     # No regular members found; check if there are experts to ping
                     try:
@@ -514,7 +557,7 @@ async def on_message(message):
                     allowed = discord.AllowedMentions(users=True)
                     # Use the DB club name(s) in the embed title when available
                     combined_club_name = ', '.join(club_display_names) if club_display_names else None
-                    embed_title = f'Groundhelp Anfrage — {combined_club_name}' if combined_club_name else 'Groundhelp Anfrage'
+                    embed_title = f'Groundhelp — {combined_club_name}' if combined_club_name else 'Groundhelp'
                     # Determine embed color from DB if available
                     club_color = discord.Color.orange()
                     try:
