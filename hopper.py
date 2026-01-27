@@ -7,6 +7,7 @@ import os
 from dotenv import load_dotenv
 import sqlite3
 import asyncio
+from datetime import datetime, timedelta, time as dtime
 from database import HopperDatabase
 
 # Load environment variables from .env file
@@ -24,6 +25,13 @@ NEWCOMER_ROLE_ID = int(os.getenv('NEWCOMER_ROLE_ID'))
 LINE_UP_CHANNEL_ID = int(os.getenv('LINE_UP_CHANNEL_ID', 0))
 GROUNDHELP_CHANNEL_ID = int(os.getenv('GROUNDHELP_CHANNEL_ID', 0))
 GROUNDHOPPER_ROLE_ID = int(os.getenv('GROUNDHOPPER_ROLE_ID'))
+CASUAL_ROLE_ID = int(os.getenv('CASUAL_ROLE_ID', 0))
+FAN_ROLE_ID = int(os.getenv('FAN_ROLE_ID', 0))
+ULTRA_ROLE_ID = int(os.getenv('ULTRA_ROLE_ID', 0))
+
+# Activity roles that are mutually exclusive (a user may only have one)
+EXCLUSIVE_ACTIVITY_ROLE_IDS = [r for r in (CASUAL_ROLE_ID, FAN_ROLE_ID, ULTRA_ROLE_ID) if r]
+
 LOGO_URL = os.getenv('LOGO_URL')
 DATABASE_NAME = os.getenv('DATABASE_NAME')
 
@@ -246,6 +254,19 @@ async def on_ready():
     # Post the member list
     await post_member_list(guild)
 
+    # Sync activity roles once at startup (map existing status to roles)
+    try:
+        await sync_activity_roles(guild)
+    except Exception as e:
+        print(f'Error during activity role sync at startup: {e}')
+
+    # Start a background task to run the sync daily at 01:00
+    try:
+        if not hasattr(bot, 'activity_sync_task') or bot.activity_sync_task.done():
+            bot.activity_sync_task = asyncio.create_task(schedule_activity_sync(guild))
+    except Exception as e:
+        print(f'Error starting activity sync scheduler: {e}')
+
 @bot.event
 async def on_member_join(member):
     """When a new member joins the server:
@@ -385,6 +406,103 @@ async def on_reaction_add(reaction, user):
         db.increment_activity(user.id)
     except Exception as e:
         print(f'Error incrementing activity on reaction: {e}')
+
+# Helper: assign exclusive activity role (remove other activity roles)
+async def assign_exclusive_activity_role(member: discord.Member, role_id: int | None):
+    if not EXCLUSIVE_ACTIVITY_ROLE_IDS:
+        return
+    guild = member.guild
+    try:
+        roles_to_remove = []
+        for rid in EXCLUSIVE_ACTIVITY_ROLE_IDS:
+            r = guild.get_role(rid)
+            if not r:
+                continue
+            if r in member.roles and (role_id is None or rid != role_id):
+                roles_to_remove.append(r)
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove, reason='Ensure exclusive activity role')
+        if role_id:
+            new_role = guild.get_role(role_id)
+            if new_role and new_role not in member.roles:
+                await member.add_roles(new_role, reason='Assign exclusive activity role')
+    except Exception as e:
+        print(f'Error assigning exclusive activity role for {member.id}: {e}')
+
+
+async def update_activity_role(member: discord.Member):
+    if member.bot:
+        return
+    try:
+        lvl = db.get_user_level(member.id)
+    except Exception as e:
+        print(f'Error fetching level for {member.id}: {e}')
+        lvl = None
+    # Determine desired role based on lvl which may be a string ("Ultra"/"Fan"/"Casual")
+    desired = None
+    if lvl is None:
+        desired = None
+    else:
+        # If DB returns descriptive strings, map them directly
+        if isinstance(lvl, str):
+            s = lvl.strip().lower()
+            if s == 'ultra' and ULTRA_ROLE_ID:
+                desired = ULTRA_ROLE_ID
+            elif s == 'fan' and FAN_ROLE_ID:
+                desired = FAN_ROLE_ID
+            elif s == 'casual' and CASUAL_ROLE_ID:
+                desired = CASUAL_ROLE_ID
+
+    await assign_exclusive_activity_role(member, desired)
+
+async def sync_activity_roles(guild: discord.Guild):
+    """Iterate all members and sync their activity-based role once."""
+    print('Syncing activity roles for all members...')
+    try:
+        for member in guild.members:
+            if member.bot:
+                continue
+            try:
+                await update_activity_role(member)
+                await asyncio.sleep(0.15)
+            except Exception as e:
+                print(f'Error syncing activity role for {member.id}: {e}')
+        print('Activity role sync completed.')
+    except Exception as e:
+        print(f'Error during activity role sync: {e}')
+
+
+async def schedule_activity_sync(guild: discord.Guild):
+    """Background task: schedule sync for 01:00 GMT+1 daily (fixed offset)."""
+    offset = timedelta(hours=1)  # GMT+1 fixed offset
+    while True:
+        # Work in UTC, compute next 01:00 in GMT+1 and convert back to UTC for sleeping
+        now_utc = datetime.utcnow()
+        now_gmt1 = now_utc + offset
+        target_gmt1 = datetime.combine(now_gmt1.date(), dtime(hour=1))
+        if target_gmt1 <= now_gmt1:
+            target_gmt1 += timedelta(days=1)
+        # Convert target back to UTC
+        target_utc = target_gmt1 - offset
+        wait_seconds = (target_utc - now_utc).total_seconds()
+        print(f'Activity sync scheduled in {int(wait_seconds)} seconds (next run at {target_gmt1} GMT+1 / {target_utc} UTC).')
+        try:
+            await asyncio.sleep(wait_seconds)
+        except asyncio.CancelledError:
+            print('Activity sync scheduler cancelled.')
+            return
+
+        try:
+            await sync_activity_roles(guild)
+        except Exception as e:
+            print(f'Error during scheduled activity sync: {e}')
+
+        # After running, sleep 24 hours until the next run (keeps the loop simple)
+        try:
+            await asyncio.sleep(24 * 3600)
+        except asyncio.CancelledError:
+            print('Activity sync scheduler cancelled during 24h sleep.')
+            return
 
 # Autocomplete functions
 async def country_autocomplete(interaction: discord.Interaction, current: str):
