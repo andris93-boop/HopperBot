@@ -399,14 +399,14 @@ async def on_message(message):
                             await message.channel.send('Club not found')
                             continue
                         if len(like_matches) > 5:
-                            await message.channel.send('entry matches too many clubs')
+                            await message.channel.send(f'{query} matches too many clubs')
                             continue
                         if len(like_matches) == 1:
                             club_id = like_matches[0][0]
                         else:
                             # Multiple (but <=5) matches: ask user to be more specific
                             names = ', '.join([m[1] for m in like_matches])
-                            await message.channel.send(f'Multiple clubs match: {names} — please be more specific')
+                            await message.channel.send(f'{query} matches multiple clubs: {names}')
                             continue
 
                     members_data = db.get_members_by_club_id(guild.id, club_id)
