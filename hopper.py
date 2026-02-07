@@ -6,6 +6,7 @@ from discord.ext import commands
 import os
 from dotenv import load_dotenv
 import asyncio
+import re
 from datetime import datetime, timedelta, time as dtime
 from database import HopperDatabase
 
@@ -120,7 +121,7 @@ def format_club_info(result):
     """Formats raw club info tuple into a dictionary.
 
     Args:
-        result: Tuple from database (name, league_name, country, logo, tier, flag, id, color, league_logo)
+        result: Tuple from database (name, league_name, country, logo, tier, flag, id, color, league_logo, ticket_notes, ticket_url)
 
     Returns:
         Dictionary with formatted club information or None
@@ -138,6 +139,9 @@ def format_club_info(result):
     data["club_id"] = result[6]
     data["color"] = discord.Color(int(result[7], 16)) if result[7] else default_color
     data["league_logo"] = logo2URL(result[8]) if result[8] else ''
+    # optional ticketing info (may not exist on older DBs)
+    data["ticket_notes"] = result[9] if len(result) > 9 and result[9] else ''
+    data["ticket_url"] = result[10] if len(result) > 10 and result[10] else ''
     data["no_league"] = not result[1] or not result[2]
     return data
 
@@ -148,6 +152,17 @@ def embed_for_club(club: dict):
     )
     if club['club_logo'] != "":
         embed.set_thumbnail(url=club['club_logo'])
+    # include ticketing info when available
+    try:
+        if club.get('ticket_url'):
+            embed.add_field(name='Tickets', value=club['ticket_url'], inline=False)
+        if club.get('ticket_notes'):
+            notes = str(club.get('ticket_notes'))
+            if len(notes) > 1000:
+                notes = notes[:997] + '...'
+            embed.add_field(name='Ticket notes', value=notes, inline=False)
+    except Exception:
+        pass
     return embed
 
 def post_embeds(channel, msg, embeds):
@@ -447,15 +462,12 @@ async def on_message(message):
                             league_name = info[1] if len(info) > 1 else None
                             if league_name:
                                 league_names.add(league_name)
-                                league_list.append(league_name)
-                            # store per-league logo candidate if present
-                            if len(info) > 8 and info[8]:
-                                try:
-                                    if league_name and league_name not in league_logo_map:
-                                        league_logo_map[league_name] = info[8]
-                                except Exception:
-                                    pass
-                            # fallback first-seen candidate (kept for compatibility)
+                            if expert_mentions:
+                                embed.add_field(name=f'Experts ({len(expert_mentions)})', value=', '.join(expert_mentions), inline=False)
+                            await interaction.followup.send(embed=embed)
+                            return
+
+                        
                             if len(info) > 8 and info[8] and not league_logo_candidate:
                                 league_logo_candidate = info[8]
                         except Exception:
@@ -1156,6 +1168,53 @@ async def show_club_info(interaction: discord.Interaction, club: str):
         )
     
     await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+# Slash command: /add-ticketinginfo -> open a Modal to add ticket URL and notes
+@bot.tree.command(name="add-ticketinginfo", description="Add or update ticketing info for a club", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(country="The country of the club", club="The club to update")
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
+async def add_ticketinginfo_command(interaction: discord.Interaction, country: str, club: str):
+    """Opens a modal to set ticketing notes and URL for a club."""
+    # Attempt to open a modal directly
+    club_id = db.get_club_id_by_name(club)
+    if not club_id:
+        await interaction.response.send_message(f"❌ Club '{club}' not found.", ephemeral=True)
+        return
+
+    class TicketModal(discord.ui.Modal, title=f"Ticketing for {club}"):
+        ticket_url = discord.ui.TextInput(label="Ticket URL", style=discord.TextStyle.short, required=False)
+        ticket_notes = discord.ui.TextInput(label="Ticket notes", style=discord.TextStyle.paragraph, required=False, max_length=1000)
+
+        def __init__(self, club_name, club_id):
+            super().__init__()
+            self.club_name = club_name
+            self.club_id = club_id
+
+        async def on_submit(self, modal_interaction: discord.Interaction):
+            url = self.ticket_url.value.strip()
+            notes = self.ticket_notes.value.strip()
+            # Basic URL validation
+            if url and not re.match(r'^https?://', url):
+                await modal_interaction.response.send_message('Ungültige URL (muss mit http:// oder https:// beginnen).', ephemeral=True)
+                return
+            try:
+                db.update_club_ticket_info(self.club_id, notes, url)
+            except Exception as e:
+                print(f'Error updating ticket info: {e}')
+                await modal_interaction.response.send_message('Fehler beim Speichern der Ticketinformationen.', ephemeral=True)
+                return
+            await modal_interaction.response.send_message(f'✅ Ticketinformationen für {self.club_name} wurden gespeichert.', ephemeral=True)
+            # show updated club info
+            try:
+                await show_club_info(modal_interaction, self.club_name)
+            except Exception:
+                pass
+
+    modal = TicketModal(club, club_id)
+    try:
+        await interaction.response.send_modal(modal)
+    except Exception:
+        await interaction.response.send_message('Could not open modal in this context.', ephemeral=True)
 
 # Slash command: /set-clubicon
 @bot.tree.command(name="set-clubicon", description="Set or update a club's logo (PNG recommended)", guild=discord.Object(id=GUILD_ID))
