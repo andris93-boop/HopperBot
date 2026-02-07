@@ -152,17 +152,7 @@ def embed_for_club(club: dict):
     )
     if club['club_logo'] != "":
         embed.set_thumbnail(url=club['club_logo'])
-    # include ticketing info when available
-    try:
-        if club.get('ticket_url'):
-            embed.add_field(name='Tickets', value=club['ticket_url'], inline=False)
-        if club.get('ticket_notes'):
-            notes = str(club.get('ticket_notes'))
-            if len(notes) > 1000:
-                notes = notes[:997] + '...'
-            embed.add_field(name='Ticket notes', value=notes, inline=False)
-    except Exception:
-        pass
+    # ticketing info is added by the caller (show_club_info) to control ordering
     return embed
 
 def post_embeds(channel, msg, embeds):
@@ -1166,7 +1156,20 @@ async def show_club_info(interaction: discord.Interaction, club: str):
             value=", ".join(expert_mentions),
             inline=False
         )
-    
+    # Add ticketing info as a single grouped field (notes then link)
+    try:
+        ticket_notes = info.get('ticket_notes', '')
+        ticket_url = info.get('ticket_url', '')
+        if ticket_notes or ticket_url:
+            parts = []
+            if ticket_notes:
+                parts.append(str(ticket_notes))
+            if ticket_url:
+                parts.append(f"[Official Ticketing Website]({ticket_url})")
+            embed.add_field(name='Ticketing Info', value='\n'.join(parts), inline=False)
+    except Exception:
+        pass
+
     await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 # Slash command: /add-ticketinginfo -> open a Modal to add ticket URL and notes
