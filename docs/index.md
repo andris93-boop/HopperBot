@@ -20,6 +20,8 @@ Every time a user sends a message, the bot counts it. The only data that is stor
 - **Fan:** at least 1 message on 2 different days
 - **Ultra:** at least 1 message on 5 different days
 
+The bot will automatically assign roles accordingly.
+
 # Commands
 
 ## /set-club
@@ -88,6 +90,9 @@ We plan to use tags in future features, but for now this is their only function.
 ## !ping
 This command allows you to ping the bot to check if it is online.
 If the bot is running, it will respond.
+
+## "$Club" 
+with this funktion you are able to trigger a message that pings the users that are members of the according club. You can ping as much clubs as you want, but it is limited to send out a maximum of 10 pings. up to two pings works insant. if it are 3 or more, the bot will send a dm that you have to confirm, it shows how many people and who exactl you are about to ping 
 
 # Disclaimer
 

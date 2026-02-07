@@ -42,6 +42,8 @@ class HopperDatabase:
                 logo TEXT,
                 flag TEXT,
                 color TEXT,
+                ticket_notes TEXT,
+                ticket_url TEXT,
                 FOREIGN KEY (league_id) REFERENCES leagues(id)
             )
         ''')
@@ -51,6 +53,11 @@ class HopperDatabase:
         columns = [column[1] for column in cursor.fetchall()]
         if 'color' not in columns:
             cursor.execute('ALTER TABLE clubs ADD COLUMN color TEXT')
+        # Add ticketing columns if missing
+        if 'ticket_notes' not in columns:
+            cursor.execute('ALTER TABLE clubs ADD COLUMN ticket_notes TEXT')
+        if 'ticket_url' not in columns:
+            cursor.execute('ALTER TABLE clubs ADD COLUMN ticket_url TEXT')
 
         # Table for user profiles
         cursor.execute('''
@@ -263,7 +270,7 @@ class HopperDatabase:
             club_id: The club ID to fetch
 
         Returns:
-            Tuple: (name, league_name, country, logo, tier, flag, id, color, league_logo) or None
+            Tuple: (name, league_name, country, logo, tier, flag, id, color, league_logo, ticket_notes, ticket_url) or None
         """
         if not club_id:
             return None
@@ -271,7 +278,7 @@ class HopperDatabase:
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT c.name, l.name, l.country, c.logo, l.tier, l.flag, c.id, c.color, l.logo
+            SELECT c.name, l.name, l.country, c.logo, l.tier, l.flag, c.id, c.color, l.logo, c.ticket_notes, c.ticket_url
             FROM clubs c
             LEFT JOIN leagues l ON c.league_id = l.id
             WHERE c.id = ?
@@ -321,6 +328,21 @@ class HopperDatabase:
         cursor = conn.cursor()
 
         cursor.execute('UPDATE clubs SET color = ? WHERE id = ?', (color, club_id))
+        conn.commit()
+        conn.close()
+
+    def update_club_ticket_info(self, club_id, ticket_notes, ticket_url):
+        """Updates ticketing information for a club.
+
+        Args:
+            club_id: ID of the club to update
+            ticket_notes: Short free-text notes about ticket purchase
+            ticket_url: URL to the official ticketing website
+        """
+        conn = sqlite3.connect(self.database_name)
+        cursor = conn.cursor()
+
+        cursor.execute('UPDATE clubs SET ticket_notes = ?, ticket_url = ? WHERE id = ?', (ticket_notes, ticket_url, club_id))
         conn.commit()
         conn.close()
 
