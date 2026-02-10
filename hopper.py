@@ -72,13 +72,13 @@ class ConfirmPingView(discord.ui.View):
     @discord.ui.button(label='OK', style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.author.id:
-            await interaction.response.send_message('Nur der ursprüngliche Autor kann bestätigen.', ephemeral=True)
+            await interaction.response.send_message('Only the original author can confirm.', ephemeral=True)
             return
         # send public message
         try:
             content = ' '.join(m.mention for m in self.mentions)
             sent = await self.channel.send(content=content, embed=self.public_embed, allowed_mentions=self.allowed_mentions)
-            await interaction.response.send_message('Nachricht wurde gesendet.', ephemeral=True)
+            await interaction.response.send_message('Message has been sent.', ephemeral=True)
             # optionally create thread
             if CREATE_THREAD_ON_PING and self.matched_query:
                 try:
@@ -97,9 +97,9 @@ class ConfirmPingView(discord.ui.View):
     @discord.ui.button(label='Abbrechen', style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.author.id:
-            await interaction.response.send_message('Nur der ursprüngliche Autor kann abbrechen.', ephemeral=True)
+            await interaction.response.send_message('Only the original author can cancel.', ephemeral=True)
             return
-        await interaction.response.send_message('Abgebrochen.', ephemeral=True)
+        await interaction.response.send_message('Cancelled.', ephemeral=True)
         for child in list(self.children):
             child.disabled = True
         await interaction.message.edit(view=self)
@@ -707,15 +707,15 @@ async def on_message(message):
 
                     except Exception as e:
                         print(f'Error preparing preview/confirmation: {e}')
-                        await message.channel.send('Fehler beim Erstellen der Vorschau.')
+                        await message.channel.send('Error creating preview.')
                         return
 
                     # Inform if we truncated the list (still inform the author via DM or fallback)
                     if len(unique) > MAX_MENTIONS:
                         try:
-                            await message.author.send(f'Es wurden {len(unique)} Mitglieder gefunden — nur die ersten {MAX_MENTIONS} werden nach Bestätigung erwähnt.')
+                            await message.author.send(f'Found {len(unique)} members — only the first {MAX_MENTIONS} will be mentioned after confirmation.')
                         except Exception:
-                            await message.channel.send(f'Es wurden {len(unique)} Mitglieder gefunden — nur die ersten {MAX_MENTIONS} werden erwähnt.')
+                            await message.channel.send(f'Found {len(unique)} members — only the first {MAX_MENTIONS} will be mentioned.')
 
                 return
         except Exception as e:
@@ -1195,7 +1195,7 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
             style=discord.TextStyle.paragraph,
             required=False,
             max_length=1000,
-            placeholder="Informationen zu Ticketkauf, Preisen, Besonderheiten..."
+            placeholder="Information about ticket sales, prices, special notes..."
         )
 
         def __init__(self, club_name, club_id):
@@ -1208,15 +1208,15 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
             notes = self.ticket_notes.value.strip()
             # Basic URL validation
             if url and not re.match(r'^https?://', url):
-                await modal_interaction.response.send_message('Ungültige URL (muss mit http:// oder https:// beginnen).', ephemeral=True)
+                await modal_interaction.response.send_message('Invalid URL (must start with http:// or https://).', ephemeral=True)
                 return
             try:
                 db.update_club_ticket_info(self.club_id, notes, url)
             except Exception as e:
                 print(f'Error updating ticket info: {e}')
-                await modal_interaction.response.send_message('Fehler beim Speichern der Ticketinformationen.', ephemeral=True)
+                await modal_interaction.response.send_message('Error saving ticket information.', ephemeral=True)
                 return
-            await modal_interaction.response.send_message(f'✅ Ticketinformationen für {self.club_name} wurden gespeichert.', ephemeral=True)
+            await modal_interaction.response.send_message(f'✅ Ticket information for {self.club_name} has been saved.', ephemeral=True)
             # show updated club info
             try:
                 await show_club_info(modal_interaction, self.club_name)
