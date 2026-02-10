@@ -1157,18 +1157,17 @@ async def show_club_info(interaction: discord.Interaction, club: str):
             inline=False
         )
     # Add ticketing info as a single grouped field (notes then link)
-    try:
-        ticket_notes = info.get('ticket_notes', '')
-        ticket_url = info.get('ticket_url', '')
-        if ticket_notes or ticket_url:
-            parts = []
-            if ticket_notes:
-                parts.append(str(ticket_notes))
-            if ticket_url:
-                parts.append(f"[Official Ticketing Website]({ticket_url})")
-            embed.add_field(name='Ticketing Info', value='\n'.join(parts), inline=False)
-    except Exception:
-        pass
+    
+    ticket_notes = info.get('ticket_notes', '')
+    ticket_url = info.get('ticket_url', '')
+    if ticket_notes or ticket_url:
+        parts = []
+        if ticket_notes:
+            parts.append(str(ticket_notes))
+        if ticket_url:
+            parts.append(f"[Official Ticketing Website]({ticket_url})")
+        embed.add_field(name='Ticketing Info', value='\n'.join(parts), inline=False)
+
 
     await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
@@ -1185,8 +1184,19 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
         return
 
     class TicketModal(discord.ui.Modal, title=f"Ticketing for {club}"):
-        ticket_url = discord.ui.TextInput(label="Ticket URL", style=discord.TextStyle.short, required=False)
-        ticket_notes = discord.ui.TextInput(label="Ticket notes", style=discord.TextStyle.paragraph, required=False, max_length=1000)
+        ticket_url = discord.ui.TextInput(
+            label="Ticket URL",
+            style=discord.TextStyle.short,
+            required=False,
+            placeholder="https://example.com/tickets"
+        )
+        ticket_notes = discord.ui.TextInput(
+            label="Ticket notes",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=1000,
+            placeholder="Informationen zu Ticketkauf, Preisen, Besonderheiten..."
+        )
 
         def __init__(self, club_name, club_id):
             super().__init__()
