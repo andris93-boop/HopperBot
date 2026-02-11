@@ -365,6 +365,7 @@ async def on_member_join(member):
             f"Please use the `/set-club` command to set your home club. "
             "If it does not exist yet, just enter its name "
             "and it will be created automatically. "
+            "After setting your home club with `/set-club`, you can add additional clubs you're an expert for with the `/add-expert-club` command. "
             "Please mute the line-up and bot-command channels "
             "to avoid a notification overload. "
             )
