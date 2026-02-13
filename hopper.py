@@ -26,6 +26,8 @@ WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID'))
 NEWCOMER_ROLE_ID = int(os.getenv('NEWCOMER_ROLE_ID'))
 LINE_UP_CHANNEL_ID = int(os.getenv('LINE_UP_CHANNEL_ID', 0))
 GROUNDHELP_CHANNEL_ID = int(os.getenv('GROUNDHELP_CHANNEL_ID', 0))
+MEMBERSHIP_APPLICATION_CHANNEL_ID = int(os.getenv('MEMBERSHIP_APPLICATION_CHANNEL_ID', 0))
+MOD_VERFICATION_CHANNEL_ID = int(os.getenv('MOD_VERFICATION_CHANNEL_ID', 0))
 GROUNDHOPPER_ROLE_ID = int(os.getenv('GROUNDHOPPER_ROLE_ID'))
 CASUAL_ROLE_ID = int(os.getenv('CASUAL_ROLE_ID', 0))
 FAN_ROLE_ID = int(os.getenv('FAN_ROLE_ID', 0))
@@ -112,6 +114,66 @@ class ConfirmPingView(discord.ui.View):
         for child in list(self.children):
             child.disabled = True
         await interaction.message.edit(view=self)
+
+
+class MembershipReviewView(discord.ui.View):
+    def __init__(self, applicant_id: int, application_message_id: int):
+        super().__init__(timeout=None)
+        self.applicant_id = applicant_id
+        self.application_message_id = application_message_id
+
+    def _disable_all(self):
+        for child in list(self.children):
+            child.disabled = True
+
+    @discord.ui.button(label='Approve', style=discord.ButtonStyle.green)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message('You do not have permission to review applications.', ephemeral=True)
+            return
+
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message('Guild not available.', ephemeral=True)
+            return
+
+        member = guild.get_member(self.applicant_id)
+        if member is None:
+            await interaction.response.send_message('Applicant not found on this server.', ephemeral=True)
+            return
+
+        apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+        try:
+            if apprentice_role and apprentice_role in member.roles:
+                await member.remove_roles(apprentice_role, reason='Membership application approved')
+            await assign_exclusive_activity_role(member, CASUAL_ROLE_ID if CASUAL_ROLE_ID else None)
+            if CASUAL_ROLE_ID and guild.get_role(CASUAL_ROLE_ID) and guild.get_role(CASUAL_ROLE_ID) not in member.roles:
+                await member.add_roles(guild.get_role(CASUAL_ROLE_ID), reason='Membership application approved')
+        except Exception as e:
+            await interaction.response.send_message(f'Error while approving application: {e}', ephemeral=True)
+            return
+
+        self._disable_all()
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message(f'Approved application for {member.mention}. Role set to Casual.', ephemeral=True)
+
+    @discord.ui.button(label='Deny', style=discord.ButtonStyle.red)
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message('You do not have permission to review applications.', ephemeral=True)
+            return
+
+        guild = interaction.guild
+        member = guild.get_member(self.applicant_id) if guild else None
+
+        self._disable_all()
+        await interaction.message.edit(view=self)
+        if member:
+            await interaction.response.send_message(f'Denied application for {member.mention}. Apprentice role stays unchanged.', ephemeral=True)
+        else:
+            await interaction.response.send_message('Denied application. Applicant not found in guild.', ephemeral=True)
+
+
 def nbsp(text):
     """Replaces all regular spaces with non-breaking spaces."""
     return text.replace(' ', '\u00A0')
@@ -394,6 +456,45 @@ async def on_message(message):
         db.increment_activity(message.author.id)
     except Exception as e:
         print(f'Error incrementing activity: {e}')
+
+    # Membership application channel: forward apprentice applications to mod verification channel
+    if message.channel.id == MEMBERSHIP_APPLICATION_CHANNEL_ID:
+        try:
+            guild = message.guild
+            if guild is None:
+                return
+
+            apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+            if apprentice_role is None or apprentice_role not in message.author.roles:
+                await message.reply('Only users with the Apprentice role can apply here.', mention_author=False)
+                return
+
+            has_proof = bool(message.attachments) or bool((message.content or '').strip())
+            if not has_proof:
+                await message.reply('Please attach a screenshot or provide another proof of your groundhopping activities.', mention_author=False)
+                return
+
+            mod_channel = bot.get_channel(MOD_VERFICATION_CHANNEL_ID)
+            if not mod_channel:
+                print(f'Mod verification channel with ID {MOD_VERFICATION_CHANNEL_ID} not found.')
+                return
+
+            embed = discord.Embed(title='Membership Application', color=discord.Color.gold(), timestamp=message.created_at)
+            embed.add_field(name='Applicant', value=f'{message.author.mention} ({message.author.id})', inline=False)
+            embed.add_field(name='Original Message', value=f'[Jump to message]({message.jump_url})', inline=False)
+            embed.add_field(name='Text', value=message.content if message.content else '(no text)', inline=False)
+
+            if message.attachments:
+                attachment_lines = []
+                for attachment in message.attachments:
+                    attachment_lines.append(f'[{attachment.filename}]({attachment.url})')
+                embed.add_field(name='Attachments', value='\n'.join(attachment_lines), inline=False)
+
+            review_view = MembershipReviewView(applicant_id=message.author.id, application_message_id=message.id)
+            await mod_channel.send(embed=embed, view=review_view, allowed_mentions=discord.AllowedMentions.none())
+            await message.add_reaction('📨')
+        except Exception as e:
+            print(f'Error forwarding membership application: {e}')
 
     # Groundhelp channel: detect $ClubName and notify matching members
     if message.channel.id == GROUNDHELP_CHANNEL_ID:
