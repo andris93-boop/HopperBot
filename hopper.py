@@ -33,6 +33,7 @@ LINE_UP_CHANNEL_ID = int(os.getenv('LINE_UP_CHANNEL_ID', 0))
 GROUNDHELP_CHANNEL_ID = int(os.getenv('GROUNDHELP_CHANNEL_ID', 0))
 MEMBERSHIP_APPLICATION_CHANNEL_ID = int(os.getenv('MEMBERSHIP_APPLICATION_CHANNEL_ID', 0))
 MOD_VERFICATION_CHANNEL_ID = int(os.getenv('MOD_VERFICATION_CHANNEL_ID', 0))
+BOT_COMMAND_CHANNEL_ID = int(os.getenv('BOT_COMMAND_CHANNEL_ID', 0))
 GROUNDHOPPER_ROLE_ID = int(os.getenv('GROUNDHOPPER_ROLE_ID'))
 CASUAL_ROLE_ID = int(os.getenv('CASUAL_ROLE_ID', 0))
 FAN_ROLE_ID = int(os.getenv('FAN_ROLE_ID', 0))
@@ -83,6 +84,12 @@ CREATE_THREAD_ON_PING = False
 #     'verification_message_id': int
 # } }
 ACTIVE_MEMBERSHIP_APPLICATIONS = {}
+
+# Bot-command channel overview message handling
+BOT_COMMAND_OVERVIEW_MESSAGE_ID = 0
+BOT_COMMAND_OVERVIEW_MARKER = 'hopper-bot-command-overview-v1'
+BOT_COMMAND_MESSAGE_TTL_SECONDS = 15 * 60
+ACTIVE_BOT_COMMAND_CHANNEL_ID = BOT_COMMAND_CHANNEL_ID
 
 
 class ConfirmPingView(discord.ui.View):
@@ -514,6 +521,177 @@ async def ping(ctx):
     await ctx.send(f'Yes, {ctx.author.mention}, I\'m here ! :robot: :saluting_face: ({version})')
 
 
+def _is_bot_command_overview_message(message: discord.Message) -> bool:
+    if not message:
+        return False
+    if BOT_COMMAND_OVERVIEW_MARKER in (message.content or ''):
+        return True
+    for embed in message.embeds:
+        footer = getattr(embed, 'footer', None)
+        footer_text = getattr(footer, 'text', None)
+        if footer_text and BOT_COMMAND_OVERVIEW_MARKER in footer_text:
+            return True
+    return False
+
+
+def _build_bot_command_overview_embed(synced_commands):
+    category_order = [
+        'Setup & Profil',
+        'Club-Infos',
+        'Tags',
+        'Club-Verwaltung',
+        'Expert-Clubs',
+        'Weitere Commands'
+    ]
+    category_map = {
+        'set-club': 'Setup & Profil',
+        'profile': 'Setup & Profil',
+        'club': 'Club-Infos',
+        'tags': 'Tags',
+        'add-tag': 'Tags',
+        'update-league': 'Club-Verwaltung',
+        'set-clubicon': 'Club-Verwaltung',
+        'set-clubcolor': 'Club-Verwaltung',
+        'add-ticketinginfo': 'Club-Verwaltung',
+        'add-expert-club': 'Expert-Clubs',
+        'remove-expert-club': 'Expert-Clubs',
+    }
+
+    grouped = {name: [] for name in category_order}
+    for command in synced_commands or []:
+        try:
+            if getattr(command, 'type', discord.AppCommandType.chat_input) != discord.AppCommandType.chat_input:
+                continue
+        except Exception:
+            continue
+
+        cmd_name = getattr(command, 'name', None)
+        if not cmd_name:
+            continue
+
+        cmd_description = (getattr(command, 'description', None) or 'No description').strip()
+        cmd_id = getattr(command, 'id', None)
+        cmd_mention = f'</{cmd_name}:{cmd_id}>' if cmd_id else f'/{cmd_name}'
+        category = category_map.get(cmd_name, 'Weitere Commands')
+        grouped.setdefault(category, []).append((cmd_name.lower(), cmd_mention, cmd_description))
+
+    for entries in grouped.values():
+        entries.sort(key=lambda item: item[0])
+
+    lines = [
+        'Hier sind alle verfügbaren Slash-Commands, sortiert nach Bereichen:',
+        ''
+    ]
+    for category in category_order:
+        entries = grouped.get(category, [])
+        if not entries:
+            continue
+        lines.append(f'**{category}**')
+        for _, mention, description in entries:
+            lines.append(f'• {mention} — {description}')
+        lines.append('')
+
+    if lines and not lines[-1].strip():
+        lines.pop()
+
+    if len(lines) <= 1:
+        lines = [
+            'Slash-Commands werden gerade synchronisiert.',
+            'Bitte in wenigen Sekunden erneut versuchen.'
+        ]
+
+    embed = discord.Embed(
+        title='Bot Commands',
+        description='\n'.join(lines),
+        color=discord.Color.blurple()
+    )
+    embed.set_footer(text=f'{BOT_COMMAND_OVERVIEW_MARKER} | Auto-delete: 15 minutes (except this message)')
+    return embed
+
+
+async def _delete_message_after_delay(message: discord.Message, delay_seconds: int):
+    try:
+        await asyncio.sleep(delay_seconds)
+        if message.id == BOT_COMMAND_OVERVIEW_MESSAGE_ID or _is_bot_command_overview_message(message):
+            return
+        await message.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f'Error deleting message {getattr(message, "id", "unknown")} after delay: {e}')
+
+
+def _resolve_bot_command_channel(guild: discord.Guild | None):
+    global ACTIVE_BOT_COMMAND_CHANNEL_ID
+
+    channel = None
+    if BOT_COMMAND_CHANNEL_ID:
+        channel = bot.get_channel(BOT_COMMAND_CHANNEL_ID)
+        if channel is None and guild is not None:
+            channel = guild.get_channel(BOT_COMMAND_CHANNEL_ID)
+
+    if channel is None and guild is not None:
+        fallback_names = {'bot-command', 'bot-commands', 'bot_command'}
+        for text_channel in getattr(guild, 'text_channels', []):
+            if getattr(text_channel, 'name', '').lower() in fallback_names:
+                channel = text_channel
+                break
+
+    ACTIVE_BOT_COMMAND_CHANNEL_ID = getattr(channel, 'id', 0) if channel else 0
+    return channel
+
+
+async def ensure_bot_command_overview_message(synced_commands):
+    global BOT_COMMAND_OVERVIEW_MESSAGE_ID
+
+    guild = bot.get_guild(GUILD_ID)
+    channel = _resolve_bot_command_channel(guild)
+    if channel is None:
+        print(f'Bot command channel not found. env BOT_COMMAND_CHANNEL_ID={BOT_COMMAND_CHANNEL_ID}')
+        return
+
+    if BOT_COMMAND_CHANNEL_ID and channel.id == BOT_COMMAND_CHANNEL_ID:
+        print(f'Bot command channel resolved by ID: {channel.id}')
+    else:
+        print(f'Bot command channel resolved by name fallback: {channel.name} ({channel.id})')
+
+    embed = _build_bot_command_overview_embed(synced_commands)
+    overview_message = None
+    messages_to_delete = []
+
+    async for msg in channel.history(limit=200):
+        if _is_bot_command_overview_message(msg):
+            if overview_message is None:
+                overview_message = msg
+            else:
+                messages_to_delete.append(msg)
+            continue
+        messages_to_delete.append(msg)
+
+    if overview_message is None:
+        overview_message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await overview_message.edit(content='', embed=embed)
+
+    BOT_COMMAND_OVERVIEW_MESSAGE_ID = overview_message.id
+
+    try:
+        if not overview_message.pinned:
+            await overview_message.pin(reason='Keep command overview visible')
+    except Exception as e:
+        print(f'Could not pin command overview message: {e}')
+
+    for msg in messages_to_delete:
+        if msg.id == BOT_COMMAND_OVERVIEW_MESSAGE_ID:
+            continue
+        try:
+            await msg.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f'Error deleting old message {msg.id} in bot-command channel: {e}')
+
+
 async def migrate_users_without_club_to_newcomer(guild: discord.Guild):
     """Ensure legacy users without a club are moved to newcomer role."""
     newcomer_role = guild.get_role(NEWCOMER_ROLE_ID) if NEWCOMER_ROLE_ID else None
@@ -570,10 +748,12 @@ async def on_ready():
     print(f'{bot.user} is logged in!')
 
     # Sync slash commands
+    synced_commands = []
     try:
         global SET_CLUB_COMMAND_MENTION, ADD_EXPERT_CLUB_COMMAND_MENTION
-        synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-        print(f'Synced {len(synced)} command(s) to guild {GUILD_ID}')
+        synced_commands = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+        print(f'Synced {len(synced_commands)} command(s) to guild {GUILD_ID}')
+        synced = synced_commands
         set_club_synced = next((cmd for cmd in synced if cmd.name == 'set-club'), None)
         if set_club_synced:
             SET_CLUB_COMMAND_MENTION = f'</{set_club_synced.name}:{set_club_synced.id}>'
@@ -582,6 +762,17 @@ async def on_ready():
             ADD_EXPERT_CLUB_COMMAND_MENTION = f'</{add_expert_club_synced.name}:{add_expert_club_synced.id}>'
     except Exception as e:
         print(f'Failed to sync commands: {e}')
+        try:
+            synced_commands = await bot.tree.fetch_commands(guild=discord.Object(id=GUILD_ID))
+            print(f'Fetched {len(synced_commands)} existing guild command(s) after sync failure.')
+        except Exception as fetch_error:
+            print(f'Failed to fetch guild commands: {fetch_error}')
+
+    # Ensure bot-command overview message exists and stays visible
+    try:
+        await ensure_bot_command_overview_message(synced_commands)
+    except Exception as e:
+        print(f'Error ensuring bot-command overview message: {e}')
 
     # Find the server (guild)
     guild = bot.get_guild(GUILD_ID)
@@ -677,6 +868,10 @@ async def on_member_join(member):
 @bot.event
 async def on_message(message):
     """Handle messages in the set-club channel."""
+    if ACTIVE_BOT_COMMAND_CHANNEL_ID and message.channel.id == ACTIVE_BOT_COMMAND_CHANNEL_ID:
+        if message.id != BOT_COMMAND_OVERVIEW_MESSAGE_ID and not _is_bot_command_overview_message(message):
+            asyncio.create_task(_delete_message_after_delay(message, BOT_COMMAND_MESSAGE_TTL_SECONDS))
+
     # Ignore bot messages
     if message.author.bot:
         return
