@@ -19,6 +19,7 @@ version = "1.6.1"
 
 # Filled after slash-command sync; falls back to plain command text.
 SET_CLUB_COMMAND_MENTION = '/set-club'
+ADD_EXPERT_CLUB_COMMAND_MENTION = '/add-expert-club'
 
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -569,12 +570,15 @@ async def on_ready():
 
     # Sync slash commands
     try:
-        global SET_CLUB_COMMAND_MENTION
+        global SET_CLUB_COMMAND_MENTION, ADD_EXPERT_CLUB_COMMAND_MENTION
         synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
         print(f'Synced {len(synced)} command(s) to guild {GUILD_ID}')
         set_club_synced = next((cmd for cmd in synced if cmd.name == 'set-club'), None)
         if set_club_synced:
             SET_CLUB_COMMAND_MENTION = f'</{set_club_synced.name}:{set_club_synced.id}>'
+        add_expert_club_synced = next((cmd for cmd in synced if cmd.name == 'add-expert-club'), None)
+        if add_expert_club_synced:
+            ADD_EXPERT_CLUB_COMMAND_MENTION = f'</{add_expert_club_synced.name}:{add_expert_club_synced.id}>'
     except Exception as e:
         print(f'Failed to sync commands: {e}')
 
@@ -648,11 +652,11 @@ async def on_member_join(member):
     if welcome_channel:
         await welcome_channel.send(
             f"👋 Welcome {member.mention} to **{guild.name}**! "
-            f"Please use {SET_CLUB_COMMAND_MENTION} to set your home club. "
+            f"Please use {SET_CLUB_COMMAND_MENTION} to set your home club, by either clicking it in this message or typing it down below. "
             "If it does not exist yet, just enter its name "
-            "and it will be created automatically. "
-            "After setting your home club with `/set-club`, you can add additional clubs you're an expert for with the `/add-expert-club` command. "
-            "Please mute the line-up and bot-command channels "
+            "and it will be created automatically or contact @molkensynaere to add your club. "
+            f"After setting your home club, you can add additional clubs you're an expert for with {ADD_EXPERT_CLUB_COMMAND_MENTION}. "
+            "Please mute the line-up and bot-command channels"
             "to avoid a notification overload. "
             )
 
