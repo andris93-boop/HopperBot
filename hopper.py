@@ -20,6 +20,7 @@ version = "1.6.1"
 # Filled after slash-command sync; falls back to plain command text.
 SET_CLUB_COMMAND_MENTION = '/set-club'
 ADD_EXPERT_CLUB_COMMAND_MENTION = '/add-expert-club'
+SUPPORT_USER_ID = 257187622139592715
 
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -650,14 +651,16 @@ async def on_member_join(member):
 
     # Ask questions in the welcome channel
     if welcome_channel:
+        support_user_mention = f'<@{SUPPORT_USER_ID}>'
         await welcome_channel.send(
             f"👋 Welcome {member.mention} to **{guild.name}**! "
             f"Please use {SET_CLUB_COMMAND_MENTION} to set your home club, by either clicking it in this message or typing it down below. "
             "If it does not exist yet, just enter its name "
-            "and it will be created automatically or contact @molkensynaere to add your club. "
+            f"and it will be created automatically or contact {support_user_mention} to add your club. "
             f"After setting your home club, you can add additional clubs you're an expert for with {ADD_EXPERT_CLUB_COMMAND_MENTION}. "
             "Please mute the line-up and bot-command channels"
             "to avoid a notification overload. "
+            , allowed_mentions=discord.AllowedMentions.none()
             )
 
     else:
