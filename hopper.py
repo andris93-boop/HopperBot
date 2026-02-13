@@ -349,6 +349,8 @@ async def _post_member_list(guild):
     # Group members by country, league, and club with league tier information
     clubs = {}  # Cache club info
     no_league_clubs = set()
+    apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+    apprentice_user_ids = set(m.id for m in apprentice_role.members) if apprentice_role else set()
 
     def get_club(club_id):
         if club_id not in clubs:
@@ -360,6 +362,7 @@ async def _post_member_list(guild):
                 no_league_clubs.add(club_id)
             club["members"] = []
             club["experts"] = []
+            club["apprentices"] = []
         return clubs[club_id]
 
     for member in guild.members:
@@ -371,7 +374,10 @@ async def _post_member_list(guild):
             continue  # Skip members without a club
 
         lvl = db.get_user_level(member.id)
-        club["members"].append(nbsp(f'{member.mention} 🥇 {lvl}'))
+        if member.id in apprentice_user_ids:
+            club["apprentices"].append(nbsp(f'{member.mention} {lvl}'))
+        else:
+            club["members"].append(nbsp(f'{member.mention} 🥇 {lvl}'))
 
     expert_data = db.get_all_expert_clubs(guild.id)
     for (user_id, club_id) in expert_data:
@@ -383,7 +389,10 @@ async def _post_member_list(guild):
             continue
 
         lvl = db.get_user_level(user_id)
-        club["experts"].append(nbsp(f'{member_obj.mention} 🥈 {lvl}'))
+        if user_id in apprentice_user_ids:
+            club["apprentices"].append(nbsp(f'{member_obj.mention} {lvl}'))
+        else:
+            club["experts"].append(nbsp(f'{member_obj.mention} 🥈 {lvl}'))
 
     # Send header message
     await channel.send(f"**Server: {guild.name}**\n**Number of members: {guild.member_count}**")
@@ -420,6 +429,9 @@ async def _post_member_list(guild):
         if "experts" in club and len(club["experts"]) > 0:
             embed.add_field(name=f'Experts ({len(club["experts"])})',
                 value=", ".join(club["experts"]), inline=False)
+        if "apprentices" in club and len(club["apprentices"]) > 0:
+            embed.add_field(name=f'Apprentice ({len(club["apprentices"])})',
+                value=", ".join(club["apprentices"]), inline=False)
         embed.set_author(name=f"{club['name']} ({len(club['members'])})")
         embeds.append(embed)
 
@@ -1352,14 +1364,20 @@ async def show_club_info(interaction: discord.Interaction, club: str):
     guild = interaction.guild
     members_data = db.get_members_by_club_id(guild.id, info['club_id'])
     member_ids = set(user_id for (user_id,) in members_data)
+    apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+    apprentice_user_ids = set(m.id for m in apprentice_role.members) if apprentice_role else set()
 
     # Build member list with levels
     member_mentions = []
+    apprentice_mentions = []
     for (user_id,) in members_data:
         member = guild.get_member(user_id)
         if member:
             level = db.get_user_level(user_id)
-            member_mentions.append(f"{member.mention} {level}")
+            if user_id in apprentice_user_ids:
+                apprentice_mentions.append(f"{member.mention} {level}")
+            else:
+                member_mentions.append(f"{member.mention} {level}")
     
     # Create embed
     embed = embed_for_club(info)
@@ -1378,11 +1396,20 @@ async def show_club_info(interaction: discord.Interaction, club: str):
     for uid in expert_user_ids:
         m = guild.get_member(uid)
         if m:
-            expert_mentions.append(m.mention)
+            if uid in apprentice_user_ids:
+                apprentice_mentions.append(m.mention)
+            else:
+                expert_mentions.append(m.mention)
     if len(expert_mentions) > 0:
         embed.add_field(
             name=f"Experts ({len(expert_mentions)})",
             value=", ".join(expert_mentions),
+            inline=False
+        )
+    if len(apprentice_mentions) > 0:
+        embed.add_field(
+            name=f"Apprentice ({len(apprentice_mentions)})",
+            value=", ".join(apprentice_mentions),
             inline=False
         )
     # Add ticketing info as a single grouped field (notes then link)
