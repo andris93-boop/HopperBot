@@ -116,15 +116,81 @@ class ConfirmPingView(discord.ui.View):
         await interaction.message.edit(view=self)
 
 
+class MembershipDenyReasonModal(discord.ui.Modal, title='Deny Application'):
+    reason = discord.ui.TextInput(
+        label='Reason for denial',
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1000,
+        placeholder='Enter the reason that should be sent to the applicant.'
+    )
+
+    def __init__(self, review_view: 'MembershipReviewView', verification_channel_id: int, verification_message_id: int):
+        super().__init__()
+        self.review_view = review_view
+        self.verification_channel_id = verification_channel_id
+        self.verification_message_id = verification_message_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message('You do not have permission to review applications.', ephemeral=True)
+            return
+
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message('Guild not available.', ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        member = guild.get_member(self.review_view.applicant_id)
+        dm_status = 'not sent'
+        if member is not None:
+            try:
+                await member.send(f'Application denied\n\nReason: {self.reason.value}')
+                dm_status = 'sent'
+            except Exception:
+                dm_status = 'failed (DM closed)'
+
+        await self.review_view._delete_application_message(guild)
+        await self.review_view._delete_verification_message(guild, self.verification_channel_id, self.verification_message_id)
+
+        if member is not None:
+            await interaction.followup.send(f'Denied application for {member.mention}. Applicant DM {dm_status}.', ephemeral=True)
+        else:
+            await interaction.followup.send('Denied application. Applicant not found in guild.', ephemeral=True)
+
+
 class MembershipReviewView(discord.ui.View):
-    def __init__(self, applicant_id: int, application_message_id: int):
+    def __init__(self, applicant_id: int, application_channel_id: int, application_message_id: int):
         super().__init__(timeout=None)
         self.applicant_id = applicant_id
+        self.application_channel_id = application_channel_id
         self.application_message_id = application_message_id
 
-    def _disable_all(self):
-        for child in list(self.children):
-            child.disabled = True
+    async def _delete_application_message(self, guild: discord.Guild):
+        try:
+            channel = guild.get_channel(self.application_channel_id) or bot.get_channel(self.application_channel_id)
+            if channel is None:
+                return
+            msg = await channel.fetch_message(self.application_message_id)
+            await msg.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f'Error deleting application message {self.application_message_id}: {e}')
+
+    async def _delete_verification_message(self, guild: discord.Guild, channel_id: int, message_id: int):
+        try:
+            channel = guild.get_channel(channel_id) or bot.get_channel(channel_id)
+            if channel is None:
+                return
+            msg = await channel.fetch_message(message_id)
+            await msg.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f'Error deleting verification message {message_id}: {e}')
 
     @discord.ui.button(label='Approve', style=discord.ButtonStyle.green)
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -142,20 +208,33 @@ class MembershipReviewView(discord.ui.View):
             await interaction.response.send_message('Applicant not found on this server.', ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True)
+
         apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
         try:
             if apprentice_role and apprentice_role in member.roles:
                 await member.remove_roles(apprentice_role, reason='Membership application approved')
             await assign_exclusive_activity_role(member, CASUAL_ROLE_ID if CASUAL_ROLE_ID else None)
-            if CASUAL_ROLE_ID and guild.get_role(CASUAL_ROLE_ID) and guild.get_role(CASUAL_ROLE_ID) not in member.roles:
-                await member.add_roles(guild.get_role(CASUAL_ROLE_ID), reason='Membership application approved')
+            casual_role = guild.get_role(CASUAL_ROLE_ID) if CASUAL_ROLE_ID else None
+            if casual_role and casual_role not in member.roles:
+                await member.add_roles(casual_role, reason='Membership application approved')
         except Exception as e:
-            await interaction.response.send_message(f'Error while approving application: {e}', ephemeral=True)
+            await interaction.followup.send(f'Error while approving application: {e}', ephemeral=True)
             return
 
-        self._disable_all()
-        await interaction.message.edit(view=self)
-        await interaction.response.send_message(f'Approved application for {member.mention}. Role set to Casual.', ephemeral=True)
+        dm_status = 'sent'
+        try:
+            await member.send('Application accepted')
+        except Exception:
+            dm_status = 'failed (DM closed)'
+
+        await self._delete_application_message(guild)
+        await self._delete_verification_message(guild, interaction.channel.id, interaction.message.id)
+
+        await interaction.followup.send(
+            f'Approved application for {member.mention}. Role set to Casual. Applicant DM {dm_status}.',
+            ephemeral=True
+        )
 
     @discord.ui.button(label='Deny', style=discord.ButtonStyle.red)
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -163,15 +242,12 @@ class MembershipReviewView(discord.ui.View):
             await interaction.response.send_message('You do not have permission to review applications.', ephemeral=True)
             return
 
-        guild = interaction.guild
-        member = guild.get_member(self.applicant_id) if guild else None
-
-        self._disable_all()
-        await interaction.message.edit(view=self)
-        if member:
-            await interaction.response.send_message(f'Denied application for {member.mention}. Apprentice role stays unchanged.', ephemeral=True)
-        else:
-            await interaction.response.send_message('Denied application. Applicant not found in guild.', ephemeral=True)
+        modal = MembershipDenyReasonModal(
+            review_view=self,
+            verification_channel_id=interaction.channel.id,
+            verification_message_id=interaction.message.id
+        )
+        await interaction.response.send_modal(modal)
 
 
 def nbsp(text):
@@ -490,7 +566,11 @@ async def on_message(message):
                     attachment_lines.append(f'[{attachment.filename}]({attachment.url})')
                 embed.add_field(name='Attachments', value='\n'.join(attachment_lines), inline=False)
 
-            review_view = MembershipReviewView(applicant_id=message.author.id, application_message_id=message.id)
+            review_view = MembershipReviewView(
+                applicant_id=message.author.id,
+                application_channel_id=message.channel.id,
+                application_message_id=message.id
+            )
             await mod_channel.send(embed=embed, view=review_view, allowed_mentions=discord.AllowedMentions.none())
             await message.add_reaction('📨')
         except Exception as e:
