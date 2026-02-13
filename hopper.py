@@ -1932,6 +1932,7 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
 @app_commands.describe(country="The country of the club", club="The club to update")
 @app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
 async def add_stadiuminfo_command(interaction: discord.Interaction, country: str, club: str):
+    print(f"StadiumInfo: command invoked by user={interaction.user} ({interaction.user.id}) for club='{club}' country='{country}'")
     club_id = db.get_club_id_by_name(club)
     if not club_id:
         await interaction.response.send_message(f"❌ Club '{club}' not found.", ephemeral=True)
@@ -1964,6 +1965,9 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
             current_data: dict,
             proposed_data: dict,
             changed_fields: list[str],
+            auto_apply_fields: list[str],
+            actor_id: int,
+            actor_name: str,
         ):
             super().__init__(timeout=600)
             self.author_id = author_id
@@ -1973,6 +1977,9 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
             self.current_data = current_data
             self.proposed_data = proposed_data
             self.changed_fields = changed_fields
+            self.auto_apply_fields = auto_apply_fields
+            self.actor_id = actor_id
+            self.actor_name = actor_name
             self.index = 0
             self.confirmed_fields = []
             self.discarded_fields = []
@@ -1997,6 +2004,8 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
 
         async def _finish(self, interaction_obj: discord.Interaction):
             update_kwargs = {}
+            for field_key in self.auto_apply_fields:
+                update_kwargs[field_key] = self.proposed_data.get(field_key)
             for field_key in self.confirmed_fields:
                 update_kwargs[field_key] = self.proposed_data.get(field_key)
 
@@ -2018,8 +2027,13 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
 
             changed_text = ', '.join(field_labels.get(f, f) for f in self.confirmed_fields) if self.confirmed_fields else 'none'
             kept_text = ', '.join(field_labels.get(f, f) for f in self.discarded_fields) if self.discarded_fields else 'none'
+            auto_text = ', '.join(field_labels.get(f, f) for f in self.auto_apply_fields) if self.auto_apply_fields else 'none'
+            print(
+                f"StadiumInfo: review finished by user={self.actor_name} ({self.actor_id}) club='{self.club_name}' "
+                f"stadium_id={self.stadium_id} auto_applied={self.auto_apply_fields} confirmed={self.confirmed_fields} discarded={self.discarded_fields}"
+            )
             await interaction_obj.response.send_message(
-                f'✅ Review finished for {self.club_name}.\nApplied: {changed_text}\nKept existing: {kept_text}',
+                f'✅ Review finished for {self.club_name}.\nApplied (after confirm): {changed_text}\nApplied (new fields without confirm): {auto_text}\nKept existing: {kept_text}',
                 ephemeral=True
             )
 
@@ -2133,13 +2147,22 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
             }
 
             changed_fields = []
+            auto_apply_fields = []
             for field_key, new_value in proposed_data.items():
                 if new_value is None:
                     continue
                 if new_value != current_data.get(field_key):
-                    changed_fields.append(field_key)
+                    if current_data.get(field_key) in (None, ''):
+                        auto_apply_fields.append(field_key)
+                    else:
+                        changed_fields.append(field_key)
 
-            if not changed_fields:
+            print(
+                f"StadiumInfo: step2 submitted by user={modal_interaction.user} ({modal_interaction.user.id}) "
+                f"club='{self.club_name}' stadium_id={self.stadium_id} review_fields={changed_fields} auto_apply_fields={auto_apply_fields}"
+            )
+
+            if not changed_fields and not auto_apply_fields:
                 try:
                     db.link_club_to_stadium(self.club_id, self.stadium_id)
                 except Exception as e:
@@ -2157,6 +2180,31 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
                     pass
                 return
 
+            if not changed_fields and auto_apply_fields:
+                update_kwargs = {field_key: proposed_data.get(field_key) for field_key in auto_apply_fields}
+                try:
+                    db.update_stadium_info_partial(self.stadium_id, **update_kwargs)
+                    db.link_club_to_stadium(self.club_id, self.stadium_id)
+                except Exception as e:
+                    print(f'Error applying stadium auto fields: {e}')
+                    await modal_interaction.response.send_message('Error saving stadium information.', ephemeral=True)
+                    return
+
+                auto_text = ', '.join(field_labels.get(f, f) for f in auto_apply_fields)
+                print(
+                    f"StadiumInfo: auto-applied by user={modal_interaction.user} ({modal_interaction.user.id}) "
+                    f"club='{self.club_name}' stadium_id={self.stadium_id} fields={auto_apply_fields}"
+                )
+                await modal_interaction.response.send_message(
+                    f'✅ Stadium information saved for {self.club_name}. New fields applied without confirmation: {auto_text}',
+                    ephemeral=True
+                )
+                try:
+                    await show_club_info(modal_interaction, self.club_name)
+                except Exception:
+                    pass
+                return
+
             review_view = StadiumFieldReviewView(
                 author_id=modal_interaction.user.id,
                 club_name=self.club_name,
@@ -2165,6 +2213,9 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
                 current_data=current_data,
                 proposed_data=proposed_data,
                 changed_fields=changed_fields,
+                auto_apply_fields=auto_apply_fields,
+                actor_id=modal_interaction.user.id,
+                actor_name=str(modal_interaction.user),
             )
             await modal_interaction.response.send_message(
                 embed=review_view.build_embed(),
