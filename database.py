@@ -92,7 +92,7 @@ class HopperDatabase:
             )
         ''')
 
-        # Table for expert clubs (users can mark up to 4 clubs as 'expert for')
+        # Table for expert clubs (users can mark up to 10 clubs as 'expert for')
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS expert_clubs (
                 user_id INTEGER NOT NULL,
@@ -499,7 +499,7 @@ class HopperDatabase:
         # Check limit
         cursor.execute('SELECT COUNT(*) FROM expert_clubs WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
         count = cursor.fetchone()[0]
-        if count >= 4:
+        if count >= 10:
             conn.close()
             return False, 'limit_reached'
 

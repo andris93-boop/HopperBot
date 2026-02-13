@@ -121,13 +121,13 @@ class ConfirmPingView(discord.ui.View):
                     print(f'Could not create thread after confirm: {e}')
         except Exception as e:
             print(f'Error sending confirmed groundhelp mentions: {e}')
-            await interaction.response.send_message('Fehler beim Senden der Nachricht.', ephemeral=True)
+            await interaction.response.send_message('Error sending the message.', ephemeral=True)
         # disable buttons
         for child in list(self.children):
             child.disabled = True
         await interaction.message.edit(view=self)
 
-    @discord.ui.button(label='Abbrechen', style=discord.ButtonStyle.grey)
+    @discord.ui.button(label='Cancel', style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.author.id:
             await interaction.response.send_message('Only the original author can cancel.', ephemeral=True)
@@ -536,25 +536,25 @@ def _is_bot_command_overview_message(message: discord.Message) -> bool:
 
 def _build_bot_command_overview_embed(synced_commands):
     category_order = [
-        'Setup & Profil',
-        'Club-Infos',
+        'Setup & Profile',
+        'Club Info',
         'Tags',
-        'Club-Verwaltung',
-        'Expert-Clubs',
-        'Weitere Commands'
+        'Club Management',
+        'Expert Clubs',
+        'Other Commands'
     ]
     category_map = {
-        'set-club': 'Setup & Profil',
-        'profile': 'Setup & Profil',
-        'club': 'Club-Infos',
+        'set-club': 'Setup & Profile',
+        'profile': 'Setup & Profile',
+        'club': 'Club Info',
         'tags': 'Tags',
         'add-tag': 'Tags',
-        'update-league': 'Club-Verwaltung',
-        'set-clubicon': 'Club-Verwaltung',
-        'set-clubcolor': 'Club-Verwaltung',
-        'add-ticketinginfo': 'Club-Verwaltung',
-        'add-expert-club': 'Expert-Clubs',
-        'remove-expert-club': 'Expert-Clubs',
+        'update-league': 'Club Management',
+        'set-clubicon': 'Club Management',
+        'set-clubcolor': 'Club Management',
+        'add-ticketinginfo': 'Club Management',
+        'add-expert-club': 'Expert Clubs',
+        'remove-expert-club': 'Expert Clubs',
     }
 
     grouped = {name: [] for name in category_order}
@@ -572,14 +572,14 @@ def _build_bot_command_overview_embed(synced_commands):
         cmd_description = (getattr(command, 'description', None) or 'No description').strip()
         cmd_id = getattr(command, 'id', None)
         cmd_mention = f'</{cmd_name}:{cmd_id}>' if cmd_id else f'/{cmd_name}'
-        category = category_map.get(cmd_name, 'Weitere Commands')
+        category = category_map.get(cmd_name, 'Other Commands')
         grouped.setdefault(category, []).append((cmd_name.lower(), cmd_mention, cmd_description))
 
     for entries in grouped.values():
         entries.sort(key=lambda item: item[0])
 
     lines = [
-        'Hier sind alle verfügbaren Slash-Commands, sortiert nach Bereichen:',
+        'Here are all available slash commands, grouped by category:',
         ''
     ]
     for category in category_order:
@@ -596,8 +596,8 @@ def _build_bot_command_overview_embed(synced_commands):
 
     if len(lines) <= 1:
         lines = [
-            'Slash-Commands werden gerade synchronisiert.',
-            'Bitte in wenigen Sekunden erneut versuchen.'
+            'Slash commands are currently syncing.',
+            'Please try again in a few seconds.'
         ]
 
     embed = discord.Embed(
@@ -1238,7 +1238,7 @@ async def on_message(message):
                     try:
                         # preview embed: include message content (without $ tokens) and a compact list of profiles
                         # Embed title: show combined club name(s) (no 'Vorschau:' prefix)
-                        preview_title = combined_club_name if combined_club_name else 'Groundhelp Anfrage'
+                        preview_title = combined_club_name if combined_club_name else 'Groundhelp Request'
                         preview = discord.Embed(title=preview_title, description=desc, color=club_color)
                         if club_logo_url:
                             try:
@@ -1274,7 +1274,7 @@ async def on_message(message):
                                         print(f'Could not create thread after immediate send: {e}')
                             except Exception as e:
                                 print(f'Error sending immediate groundhelp mentions: {e}')
-                                await message.channel.send('Fehler beim direkten Senden der Groundhelp-Nachricht.')
+                                await message.channel.send('Error sending the Groundhelp message directly.')
                         else:
                             view = ConfirmPingView(author=message.author, channel=message.channel, mentions=limited, public_embed=embed, allowed_mentions=allowed, matched_query=matched_query)
 
@@ -1908,7 +1908,7 @@ async def set_clubicon_command(
     await show_club_info(interaction, club)
 
 # Slash command: /set-clubcolor
-@bot.tree.command(name="set-clubcolor", description="Set or update a club's color (hex format)", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="set-clubcolor", description="Set or update a club's embed message color (hex format)", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(
     country="The country of the club",
     club="The club to update",
@@ -1950,7 +1950,7 @@ async def set_clubcolor_command(
     await show_club_info(interaction, club)
 
 # Slash command: /add-expert-club
-@bot.tree.command(name="add-expert-club", description="Mark a club as one you are an expert for (max 4)", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="add-expert-club", description="Mark a club as one you are an expert for (max 10)", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(
     country="The country your expert club is from",
     club="The club name"
@@ -1970,7 +1970,7 @@ async def add_expert_club_command(interaction: discord.Interaction, country: str
             await interaction.followup.send(f"ℹ️ You already marked '{club}' as an expert club.", ephemeral=True)
             return
         if reason == 'limit_reached':
-            await interaction.followup.send("❌ You can mark up to 4 expert clubs. Remove one first.", ephemeral=True)
+            await interaction.followup.send("❌ You can mark up to 10 expert clubs. Remove one first.", ephemeral=True)
             return
         if reason == 'home_club':
             await interaction.followup.send("❌ You are implicitly an expert for your home club and cannot add it as an expert club.", ephemeral=True)
