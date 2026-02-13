@@ -653,14 +653,21 @@ async def on_member_join(member):
     if welcome_channel:
         support_user_mention = f'<@{SUPPORT_USER_ID}>'
         await welcome_channel.send(
-            f"👋 Welcome {member.mention} to **{guild.name}**! "
-            f"Please use {SET_CLUB_COMMAND_MENTION} to set your home club, by either clicking it in this message or typing it down below. "
-            "If it does not exist yet, just enter its name "
-            f"and it will be created automatically or contact {support_user_mention} to add your club. "
-            f"After setting your home club, you can add additional clubs you're an expert for with {ADD_EXPERT_CLUB_COMMAND_MENTION}. "
-            "For slash commands, please visit the bot-command channel. "
-            "Please mute the line-up and bot-command channels "
-            "to avoid a notification overload. "
+            f"👋 **Welcome {member.mention} to {guild.name}!**\n\n"
+            "**1) Set your home club (required for full access)**\n"
+            f"Use {SET_CLUB_COMMAND_MENTION} by clicking it in this message or typing it below.\n"
+            "If your club does not exist yet, enter its name anyway, it will be created automatically.\n"
+            f"If needed, contact {support_user_mention} to add your club.\n\n"
+            "**2) Add expert clubs (optional)**\n"
+            f"Use {ADD_EXPERT_CLUB_COMMAND_MENTION} to add clubs you're an expert for.\n\n"
+            "**3) Apprentice status & verification**\n"
+            "After setting your home club, your status changes to **Apprentice**.\n"
+            "To apply for full member status, submit your request in **membership-application**.\n"
+            "Your application will be reviewed by the mods.\n\n"
+            "**4) Where to use slash commands**\n"
+            "Please visit the **bot-command** channel for slash commands.\n\n"
+            "**5) Recommended**\n"
+            "Mute the **line-up** and **bot-command** channels to avoid notification overload."
             , allowed_mentions=discord.AllowedMentions.none()
             )
 
