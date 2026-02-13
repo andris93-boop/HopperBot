@@ -10,6 +10,7 @@ import re
 from datetime import datetime, timedelta, time as dtime
 from database import HopperDatabase
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 # Load environment variables from .env file
 ENV_PATH = Path(__file__).resolve().parent / '.env'
@@ -337,6 +338,100 @@ def logo2URL(logo_suffix):
     if LOGO_URL:
         return LOGO_URL + logo_suffix
     return None
+
+
+# Social link fixer (minimal integration)
+# Credit: inspired by Kyrela/FixTweetBot (https://github.com/Kyrela/FixTweetBot), author Kyrela.
+SOCIAL_FIX_DOMAIN_MAP = {
+    'twitter.com': 'fxtwitter.com',
+    'x.com': 'fxtwitter.com',
+    'reddit.com': 'vxreddit.com',
+    'redditmedia.com': 'vxreddit.com',
+    'instagram.com': 'fxstagram.com',
+    'tiktok.com': 'tnktok.com',
+    'threads.net': 'fixthreads.net',
+    'threads.com': 'fixthreads.net',
+    'bsky.app': 'bskx.app',
+    'youtube.com': 'koutube.com',
+    'youtu.be': 'koutube.com',
+    'twitch.tv': 'fxtwitch.seria.moe',
+    'pixiv.net': 'phixiv.net',
+    'spotify.com': 'fxspotify.com',
+}
+
+URL_REGEX = re.compile(r'https?://[^\s<>()]+', re.IGNORECASE)
+
+
+def _normalize_host(host: str) -> str:
+    if not host:
+        return ''
+    host = host.lower()
+    if host.startswith('www.'):
+        host = host[4:]
+    return host
+
+
+def _replace_social_link(url: str) -> str | None:
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return None
+
+    host = _normalize_host(parts.netloc)
+    if not host:
+        return None
+
+    target = None
+    for source_host, target_host in SOCIAL_FIX_DOMAIN_MAP.items():
+        if host == source_host or host.endswith('.' + source_host):
+            target = target_host
+            break
+
+    if not target:
+        return None
+
+    if host == target or host.endswith('.' + target):
+        return None
+
+    new_url = urlunsplit((parts.scheme, target, parts.path, parts.query, parts.fragment))
+    return new_url
+
+
+def extract_fixed_social_links(content: str):
+    if not content:
+        return []
+
+    fixed_links = []
+    seen = set()
+    for match in URL_REGEX.findall(content):
+        original = match.rstrip('.,!?;:')
+        fixed = _replace_social_link(original)
+        if fixed and fixed not in seen:
+            fixed_links.append((original, fixed))
+            seen.add(fixed)
+
+    return fixed_links
+
+
+def rewrite_social_links_in_text(content: str):
+    if not content:
+        return content, 0
+
+    replacements = 0
+
+    def _replacer(match: re.Match):
+        nonlocal replacements
+        raw = match.group(0)
+        stripped = raw.rstrip('.,!?;:')
+        suffix = raw[len(stripped):]
+        fixed = _replace_social_link(stripped)
+        if not fixed:
+            return raw
+        replacements += 1
+        return fixed + suffix
+
+    rewritten = URL_REGEX.sub(_replacer, content)
+    return rewritten, replacements
 
 def format_club_info(result):
     """Formats raw club info tuple into a dictionary.
@@ -892,6 +987,53 @@ async def on_message(message):
     # Ignore bot messages
     if message.author.bot:
         return
+
+    # Social link fixer: post improved-embed links
+    try:
+        rewritten_content, fix_count = rewrite_social_links_in_text(message.content or '')
+        if fix_count > 0:
+            outgoing_lines = [
+                f'Posted by {message.author.mention}',
+                rewritten_content if rewritten_content.strip() else '(no text)'
+            ]
+
+            if message.attachments:
+                outgoing_lines.append('Attachments:')
+                for attachment in message.attachments:
+                    outgoing_lines.append(attachment.url)
+
+            outgoing_text = '\n'.join(outgoing_lines)
+            if len(outgoing_text) > 1900:
+                outgoing_text = outgoing_text[:1890] + '\n…'
+
+            await message.channel.send(
+                outgoing_text,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+            # Remove original message to avoid duplicate unfixed/fixed links when possible
+            try:
+                can_manage_messages = False
+                if message.guild is not None:
+                    me = message.guild.me or message.guild.get_member(bot.user.id)
+                    if me:
+                        can_manage_messages = message.channel.permissions_for(me).manage_messages
+                if can_manage_messages:
+                    await message.delete()
+                else:
+                    print(
+                        f"SocialFix: missing manage_messages permission in channel={getattr(message.channel, 'id', 'unknown')} "
+                        f"for deleting original message {message.id}"
+                    )
+            except discord.NotFound:
+                pass
+            except Exception as delete_error:
+                print(f'Error deleting original message after social fix: {delete_error}')
+            print(
+                f"SocialFix: user={message.author} ({message.author.id}) channel={getattr(message.channel, 'id', 'unknown')} "
+                f"fixed={fix_count}"
+            )
+    except Exception as e:
+        print(f'Error in social link fixer: {e}')
 
     # Increment activity counter for the user
     try:
