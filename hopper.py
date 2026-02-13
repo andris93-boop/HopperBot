@@ -17,6 +17,9 @@ load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 version = "1.6.1"
 
+# Filled after slash-command sync; falls back to plain command text.
+SET_CLUB_COMMAND_MENTION = '/set-club'
+
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
 GUILD_ID = int(os.getenv('GUILD_ID'))
@@ -566,8 +569,12 @@ async def on_ready():
 
     # Sync slash commands
     try:
+        global SET_CLUB_COMMAND_MENTION
         synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
         print(f'Synced {len(synced)} command(s) to guild {GUILD_ID}')
+        set_club_synced = next((cmd for cmd in synced if cmd.name == 'set-club'), None)
+        if set_club_synced:
+            SET_CLUB_COMMAND_MENTION = f'</{set_club_synced.name}:{set_club_synced.id}>'
     except Exception as e:
         print(f'Failed to sync commands: {e}')
 
@@ -641,7 +648,7 @@ async def on_member_join(member):
     if welcome_channel:
         await welcome_channel.send(
             f"👋 Welcome {member.mention} to **{guild.name}**! "
-            f"Please use the `/set-club` command to set your home club. "
+            f"Please use {SET_CLUB_COMMAND_MENTION} to set your home club. "
             "If it does not exist yet, just enter its name "
             "and it will be created automatically. "
             "After setting your home club with `/set-club`, you can add additional clubs you're an expert for with the `/add-expert-club` command. "
