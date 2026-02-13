@@ -49,14 +49,6 @@ if not TOKEN or not DATABASE_NAME:
     exit(1)
 
 print(f"Starting Hopper Bot... (version {version}) on server ID {GUILD_ID} with database {DATABASE_NAME}")
-try:
-    import pathlib
-    env_path = pathlib.Path(__file__).resolve().parent / '.env'
-    raw = os.getenv('APPRENTICE_ROLE_ID')
-    print(f'PWD={os.getcwd()} __file__={pathlib.Path(__file__).resolve()} .env_exists={env_path.exists()} env_path={env_path}')
-    print(f"ENV APPRENTICE_ROLE_ID raw={raw!r} parsed={APPRENTICE_ROLE_ID} os.environ_has={'APPRENTICE_ROLE_ID' in os.environ}")
-except Exception as e:
-    print(f'Debug env check failed: {e}')
 
 # Initialize database
 db = HopperDatabase(DATABASE_NAME)
@@ -351,8 +343,8 @@ async def on_member_join(member):
     # Get or create the role
     role = guild.get_role(NEWCOMER_ROLE_ID)
     if role is None:
-            print(f'Could not create role: {e}')
-            return
+        print(f'Role with ID {NEWCOMER_ROLE_ID} not found in guild {guild.id}')
+        return
 
     # Assign the role to the new member
     try:
@@ -980,25 +972,7 @@ async def set_club_command(
 
     # Remove user from newcomer role if they have it
     role = guild.get_role(NEWCOMER_ROLE_ID)
-    groundhopper_role = guild.get_role(GROUNDHOPPER_ROLE_ID)
     apprentice_role = guild.get_role(APPRENTICE_ROLE_ID)
-
-    # Debug: verify apprentice role lookup and bot role position
-    try:
-        print(f'APPRENTICE_ROLE_ID={APPRENTICE_ROLE_ID}, apprentice_role={apprentice_role}')
-        if apprentice_role is None:
-            print(f'Apprentice role with ID {APPRENTICE_ROLE_ID} not found in guild {guild.id}')
-        else:
-            try:
-                bot_member = guild.me
-                if bot_member and getattr(bot_member, 'top_role', None):
-                    bot_top = bot_member.top_role
-                    if getattr(apprentice_role, 'position', None) is not None and bot_top.position <= apprentice_role.position:
-                        print(f"Bot's top role '{bot_top.name}' (pos {bot_top.position}) is not above apprentice role '{apprentice_role.name}' (pos {apprentice_role.position}); assignment will fail without proper role hierarchy or Manage Roles permission.")
-            except Exception as e:
-                print(f'Could not determine bot role position: {e}')
-    except Exception:
-        pass
 
     # Remove newcomer role if present
     if role in member.roles:
