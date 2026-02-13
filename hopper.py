@@ -9,9 +9,11 @@ import asyncio
 import re
 from datetime import datetime, timedelta, time as dtime
 from database import HopperDatabase
+from pathlib import Path
 
 # Load environment variables from .env file
-load_dotenv()
+ENV_PATH = Path(__file__).resolve().parent / '.env'
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 version = "1.6.1"
 
@@ -29,6 +31,13 @@ CASUAL_ROLE_ID = int(os.getenv('CASUAL_ROLE_ID', 0))
 FAN_ROLE_ID = int(os.getenv('FAN_ROLE_ID', 0))
 ULTRA_ROLE_ID = int(os.getenv('ULTRA_ROLE_ID', 0))
 
+# New apprentice role (optional)
+APPRENTICE_ROLE_ID = int(os.getenv('APPRENTICE_ROLE_ID') or 0)
+
+# Map groundhopper to fan on productive server (keeps backward compatibility)
+if FAN_ROLE_ID:
+    GROUNDHOPPER_ROLE_ID = FAN_ROLE_ID
+
 # Activity roles that are mutually exclusive (a user may only have one)
 EXCLUSIVE_ACTIVITY_ROLE_IDS = [r for r in (CASUAL_ROLE_ID, FAN_ROLE_ID, ULTRA_ROLE_ID) if r]
 
@@ -40,6 +49,14 @@ if not TOKEN or not DATABASE_NAME:
     exit(1)
 
 print(f"Starting Hopper Bot... (version {version}) on server ID {GUILD_ID} with database {DATABASE_NAME}")
+try:
+    import pathlib
+    env_path = pathlib.Path(__file__).resolve().parent / '.env'
+    raw = os.getenv('APPRENTICE_ROLE_ID')
+    print(f'PWD={os.getcwd()} __file__={pathlib.Path(__file__).resolve()} .env_exists={env_path.exists()} env_path={env_path}')
+    print(f"ENV APPRENTICE_ROLE_ID raw={raw!r} parsed={APPRENTICE_ROLE_ID} os.environ_has={'APPRENTICE_ROLE_ID' in os.environ}")
+except Exception as e:
+    print(f'Debug env check failed: {e}')
 
 # Initialize database
 db = HopperDatabase(DATABASE_NAME)
@@ -744,6 +761,15 @@ async def assign_exclusive_activity_role(member: discord.Member, role_id: int | 
     if not EXCLUSIVE_ACTIVITY_ROLE_IDS:
         return
     guild = member.guild
+    # Protect newcomers and apprentices from activity-role changes
+    try:
+        newcomer_role = guild.get_role(NEWCOMER_ROLE_ID) if NEWCOMER_ROLE_ID else None
+        apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+        if (newcomer_role and newcomer_role in member.roles) or (apprentice_role and apprentice_role in member.roles):
+            return
+    except Exception:
+        # defensive: if role checks fail, fall through to normal behavior
+        pass
     try:
         roles_to_remove = []
         for rid in EXCLUSIVE_ACTIVITY_ROLE_IDS:
@@ -765,6 +791,15 @@ async def assign_exclusive_activity_role(member: discord.Member, role_id: int | 
 async def update_activity_role(member: discord.Member):
     if member.bot:
         return
+    # If the member is a newcomer or apprentice, do not change activity roles
+    try:
+        guild = member.guild
+        newcomer_role = guild.get_role(NEWCOMER_ROLE_ID) if NEWCOMER_ROLE_ID else None
+        apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+        if (newcomer_role and newcomer_role in member.roles) or (apprentice_role and apprentice_role in member.roles):
+            return
+    except Exception:
+        pass
     try:
         lvl = db.get_user_level(member.id)
     except Exception as e:
@@ -791,10 +826,16 @@ async def sync_activity_roles(guild: discord.Guild):
     """Iterate all members and sync their activity-based role once."""
     print('Syncing activity roles for all members...')
     try:
+        # Pre-fetch special roles to skip members who should not be adjusted
+        newcomer_role = guild.get_role(NEWCOMER_ROLE_ID) if NEWCOMER_ROLE_ID else None
+        apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
         for member in guild.members:
             if member.bot:
                 continue
+            # Skip newcomers and apprentices — they keep their special roles until manually changed
             try:
+                if (newcomer_role and newcomer_role in member.roles) or (apprentice_role and apprentice_role in member.roles):
+                    continue
                 await update_activity_role(member)
                 await asyncio.sleep(0.15)
             except Exception as e:
@@ -940,13 +981,45 @@ async def set_club_command(
     # Remove user from newcomer role if they have it
     role = guild.get_role(NEWCOMER_ROLE_ID)
     groundhopper_role = guild.get_role(GROUNDHOPPER_ROLE_ID)
+    apprentice_role = guild.get_role(APPRENTICE_ROLE_ID)
+
+    # Debug: verify apprentice role lookup and bot role position
+    try:
+        print(f'APPRENTICE_ROLE_ID={APPRENTICE_ROLE_ID}, apprentice_role={apprentice_role}')
+        if apprentice_role is None:
+            print(f'Apprentice role with ID {APPRENTICE_ROLE_ID} not found in guild {guild.id}')
+        else:
+            try:
+                bot_member = guild.me
+                if bot_member and getattr(bot_member, 'top_role', None):
+                    bot_top = bot_member.top_role
+                    if getattr(apprentice_role, 'position', None) is not None and bot_top.position <= apprentice_role.position:
+                        print(f"Bot's top role '{bot_top.name}' (pos {bot_top.position}) is not above apprentice role '{apprentice_role.name}' (pos {apprentice_role.position}); assignment will fail without proper role hierarchy or Manage Roles permission.")
+            except Exception as e:
+                print(f'Could not determine bot role position: {e}')
+    except Exception:
+        pass
+
+    # Remove newcomer role if present
     if role in member.roles:
         try:
             await member.remove_roles(role, reason='User set club, removing newcomer role')
             print(f'Removed newcomer role from {member}')
-            await member.add_roles(groundhopper_role, reason='User set club, removing newcomer role')
         except Exception as e:
             print(f'Error removing newcomer role from {member}: {e}')
+
+    # Previously auto-assigned mapped groundhopper/fan role here.
+    # We now intentionally skip auto-assigning the fan/groundhopper role
+    # and only assign the `APPRENTICE` role above.
+
+    # Assign apprentice role to users who set their club
+    if apprentice_role:
+        try:
+            if apprentice_role not in member.roles:
+                await member.add_roles(apprentice_role, reason='User set club, assign apprentice')
+                print(f'Assigned apprentice role to {member}')
+        except Exception as e:
+            print(f'Error assigning apprentice role to {member}: {e}')
 
     await post_member_list(guild)
 
