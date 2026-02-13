@@ -658,7 +658,8 @@ async def on_member_join(member):
             "If it does not exist yet, just enter its name "
             f"and it will be created automatically or contact {support_user_mention} to add your club. "
             f"After setting your home club, you can add additional clubs you're an expert for with {ADD_EXPERT_CLUB_COMMAND_MENTION}. "
-            "Please mute the line-up and bot-command channels"
+            "For slash commands, please visit the bot-command channel. "
+            "Please mute the line-up and bot-command channels "
             "to avoid a notification overload. "
             , allowed_mentions=discord.AllowedMentions.none()
             )
