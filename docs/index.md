@@ -58,7 +58,31 @@ This command shows the club and provides the following information:
 - name of the league,
 - country,
 - members (with activity status).
-- Experts for the club
+- Experts for the club,
+- Apprentice members,
+- Ticketing information (if available),
+- Stadium information (if available),
+- Stadium plan details (if available).
+
+## /add-stadiuminfo
+This command allows you to add or update stadium information for a club.
+Because Discord modals are limited to 5 fields, the input is split into two modals:
+
+1) Stadium basics
+- Stadium name,
+- Stadium image URL,
+- Capacity,
+- Built year.
+
+2) Stadium plan details
+- Stadium plan image URL,
+- Block description,
+- How to get there.
+
+Rules:
+- Empty fields do not overwrite existing values.
+- If you enter a new value for an existing field, the bot shows a warning that this field was overwritten.
+- Stadiums are stored separately and can be shared by multiple clubs.
 
 ## /set-clubicon
 This command allows you to set or update a club's logo by providing a direct image URL.

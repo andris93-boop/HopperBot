@@ -39,18 +39,36 @@ class HopperDatabase:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 league_id INTEGER,
+                stadium_id INTEGER,
                 logo TEXT,
                 flag TEXT,
                 color TEXT,
                 ticket_notes TEXT,
                 ticket_url TEXT,
-                FOREIGN KEY (league_id) REFERENCES leagues(id)
+                FOREIGN KEY (league_id) REFERENCES leagues(id),
+                FOREIGN KEY (stadium_id) REFERENCES stadiums(id)
+            )
+        ''')
+
+        # Table for stadiums (can be shared by multiple clubs)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS stadiums (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                image_url TEXT,
+                capacity INTEGER,
+                built_year INTEGER,
+                plan_image_url TEXT,
+                block_description TEXT,
+                how_to_get_there TEXT
             )
         ''')
 
         # Add color column if it doesn't exist (for existing databases)
         cursor.execute("PRAGMA table_info(clubs)")
         columns = [column[1] for column in cursor.fetchall()]
+        if 'stadium_id' not in columns:
+            cursor.execute('ALTER TABLE clubs ADD COLUMN stadium_id INTEGER')
         if 'color' not in columns:
             cursor.execute('ALTER TABLE clubs ADD COLUMN color TEXT')
         # Add ticketing columns if missing
@@ -345,6 +363,184 @@ class HopperDatabase:
         cursor.execute('UPDATE clubs SET ticket_notes = ?, ticket_url = ? WHERE id = ?', (ticket_notes, ticket_url, club_id))
         conn.commit()
         conn.close()
+
+    def get_or_create_stadium(self, name):
+        """Finds a stadium by name or creates it if it doesn't exist yet."""
+        if not name:
+            return None
+
+        stadium_name = name.strip()
+        if not stadium_name:
+            return None
+
+        conn = sqlite3.connect(self.database_name)
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT id FROM stadiums WHERE name = ?', (stadium_name,))
+        result = cursor.fetchone()
+        if result:
+            stadium_id = result[0]
+        else:
+            cursor.execute('INSERT INTO stadiums (name) VALUES (?)', (stadium_name,))
+            stadium_id = cursor.lastrowid
+            conn.commit()
+
+        conn.close()
+        return stadium_id
+
+    def link_club_to_stadium(self, club_id, stadium_id):
+        """Links a club to a stadium ID."""
+        conn = sqlite3.connect(self.database_name)
+        cursor = conn.cursor()
+
+        cursor.execute('UPDATE clubs SET stadium_id = ? WHERE id = ?', (stadium_id, club_id))
+        conn.commit()
+        conn.close()
+
+    def get_stadium_info(self, stadium_id):
+        """Returns stadium tuple for a given stadium ID."""
+        if not stadium_id:
+            return None
+
+        conn = sqlite3.connect(self.database_name)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, name, image_url, capacity, built_year, plan_image_url, block_description, how_to_get_there
+            FROM stadiums
+            WHERE id = ?
+        ''', (stadium_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result
+
+    def get_stadium_info_for_club(self, club_id):
+        """Returns stadium tuple linked to a club, or None."""
+        if not club_id:
+            return None
+
+        conn = sqlite3.connect(self.database_name)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT s.id, s.name, s.image_url, s.capacity, s.built_year, s.plan_image_url, s.block_description, s.how_to_get_there
+            FROM clubs c
+            LEFT JOIN stadiums s ON c.stadium_id = s.id
+            WHERE c.id = ?
+        ''', (club_id,))
+        result = cursor.fetchone()
+        conn.close()
+
+        if not result or result[0] is None:
+            return None
+        return result
+
+    def update_stadium_info_partial(
+        self,
+        stadium_id,
+        name=None,
+        image_url=None,
+        capacity=None,
+        built_year=None,
+        plan_image_url=None,
+        block_description=None,
+        how_to_get_there=None,
+    ):
+        """Partially updates stadium fields.
+
+        Empty values are ignored and do not overwrite existing content.
+        Returns a dict with update metadata.
+        """
+        if not stadium_id:
+            return {
+                'updated_fields': [],
+                'overwritten_fields': [],
+                'unchanged_fields': [],
+                'skipped_empty_fields': [],
+                'not_found': True,
+            }
+
+        conn = sqlite3.connect(self.database_name)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT name, image_url, capacity, built_year, plan_image_url, block_description, how_to_get_there
+            FROM stadiums
+            WHERE id = ?
+        ''', (stadium_id,))
+        current = cursor.fetchone()
+        if not current:
+            conn.close()
+            return {
+                'updated_fields': [],
+                'overwritten_fields': [],
+                'unchanged_fields': [],
+                'skipped_empty_fields': [],
+                'not_found': True,
+            }
+
+        current_map = {
+            'name': current[0],
+            'image_url': current[1],
+            'capacity': current[2],
+            'built_year': current[3],
+            'plan_image_url': current[4],
+            'block_description': current[5],
+            'how_to_get_there': current[6],
+        }
+
+        incoming_map = {
+            'name': name,
+            'image_url': image_url,
+            'capacity': capacity,
+            'built_year': built_year,
+            'plan_image_url': plan_image_url,
+            'block_description': block_description,
+            'how_to_get_there': how_to_get_there,
+        }
+
+        set_clauses = []
+        values = []
+        updated_fields = []
+        overwritten_fields = []
+        unchanged_fields = []
+        skipped_empty_fields = []
+
+        for field, raw_value in incoming_map.items():
+            if isinstance(raw_value, str):
+                value = raw_value.strip()
+                if value == '':
+                    skipped_empty_fields.append(field)
+                    continue
+            else:
+                value = raw_value
+                if value is None:
+                    skipped_empty_fields.append(field)
+                    continue
+
+            current_value = current_map.get(field)
+            if value == current_value:
+                unchanged_fields.append(field)
+                continue
+
+            set_clauses.append(f'{field} = ?')
+            values.append(value)
+            updated_fields.append(field)
+
+            if current_value not in (None, ''):
+                overwritten_fields.append(field)
+
+        if set_clauses:
+            values.append(stadium_id)
+            cursor.execute(f"UPDATE stadiums SET {', '.join(set_clauses)} WHERE id = ?", tuple(values))
+            conn.commit()
+
+        conn.close()
+        return {
+            'updated_fields': updated_fields,
+            'overwritten_fields': overwritten_fields,
+            'unchanged_fields': unchanged_fields,
+            'skipped_empty_fields': skipped_empty_fields,
+            'not_found': False,
+        }
 
     def update_league_tier(self, league_id, tier):
         """Updates the tier of a league."""

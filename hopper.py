@@ -366,6 +366,22 @@ def format_club_info(result):
     data["no_league"] = not result[1] or not result[2]
     return data
 
+def format_stadium_info(result):
+    """Formats raw stadium info tuple into a dictionary."""
+    if not result:
+        return None
+
+    return {
+        "stadium_id": result[0],
+        "name": result[1] if len(result) > 1 and result[1] else '',
+        "image_url": result[2] if len(result) > 2 and result[2] else '',
+        "capacity": result[3] if len(result) > 3 and result[3] is not None else None,
+        "built_year": result[4] if len(result) > 4 and result[4] is not None else None,
+        "plan_image_url": result[5] if len(result) > 5 and result[5] else '',
+        "block_description": result[6] if len(result) > 6 and result[6] else '',
+        "how_to_get_there": result[7] if len(result) > 7 and result[7] else '',
+    }
+
 def embed_for_club(club: dict):
     """Creates a Discord embed for a club."""
     embed = discord.Embed(
@@ -553,6 +569,7 @@ def _build_bot_command_overview_embed(synced_commands):
         'set-clubicon': 'Club Management',
         'set-clubcolor': 'Club Management',
         'add-ticketinginfo': 'Club Management',
+        'add-stadiuminfo': 'Club Management',
         'add-expert-club': 'Expert Clubs',
         'remove-expert-club': 'Expert Clubs',
     }
@@ -1805,8 +1822,52 @@ async def show_club_info(interaction: discord.Interaction, club: str):
             parts.append(f"[Official Ticketing Website]({ticket_url})")
         embed.add_field(name='Ticketing Info', value='\n'.join(parts), inline=False)
 
+    embeds = [embed]
 
-    await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    stadium = format_stadium_info(db.get_stadium_info_for_club(info['club_id']))
+    if stadium:
+        stadium_embed = discord.Embed(
+            title='🏟️ Stadium',
+            color=info['color']
+        )
+        stadium_embed.add_field(
+            name='Name',
+            value=stadium['name'] if stadium['name'] else 'Unknown',
+            inline=False
+        )
+        stadium_embed.add_field(
+            name='Capacity',
+            value=f"{stadium['capacity']:,}" if isinstance(stadium['capacity'], int) else 'Unknown',
+            inline=True
+        )
+        stadium_embed.add_field(
+            name='Built Year',
+            value=str(stadium['built_year']) if stadium['built_year'] is not None else 'Unknown',
+            inline=True
+        )
+        if stadium['image_url']:
+            stadium_embed.set_image(url=stadium['image_url'])
+        embeds.append(stadium_embed)
+
+        stadium_plan_embed = discord.Embed(
+            title='🗺️ Stadium Plan',
+            color=info['color']
+        )
+        stadium_plan_embed.add_field(
+            name='Block Description',
+            value=stadium['block_description'] if stadium['block_description'] else 'No block description provided.',
+            inline=False
+        )
+        stadium_plan_embed.add_field(
+            name='How To Get There',
+            value=stadium['how_to_get_there'] if stadium['how_to_get_there'] else 'No transport information provided.',
+            inline=False
+        )
+        if stadium['plan_image_url']:
+            stadium_plan_embed.set_image(url=stadium['plan_image_url'])
+        embeds.append(stadium_plan_embed)
+
+    await interaction.followup.send(embeds=embeds, allowed_mentions=discord.AllowedMentions.none())
 
 # Slash command: /add-ticketinginfo -> open a Modal to add ticket URL and notes
 @bot.tree.command(name="add-ticketinginfo", description="Add or update ticketing info for a club", guild=discord.Object(id=GUILD_ID))
@@ -1861,6 +1922,217 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
                 pass
 
     modal = TicketModal(club, club_id)
+    try:
+        await interaction.response.send_modal(modal)
+    except Exception:
+        await interaction.response.send_message('Could not open modal in this context.', ephemeral=True)
+
+# Slash command: /add-stadiuminfo -> open two modals to add stadium fields
+@bot.tree.command(name="add-stadiuminfo", description="Add or update stadium info for a club", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(country="The country of the club", club="The club to update")
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
+async def add_stadiuminfo_command(interaction: discord.Interaction, country: str, club: str):
+    club_id = db.get_club_id_by_name(club)
+    if not club_id:
+        await interaction.response.send_message(f"❌ Club '{club}' not found.", ephemeral=True)
+        return
+
+    existing_stadium = format_stadium_info(db.get_stadium_info_for_club(club_id))
+
+    class StadiumInfoStepTwoLauncherView(discord.ui.View):
+        def __init__(self, author_id: int, next_modal: discord.ui.Modal):
+            super().__init__(timeout=300)
+            self.author_id = author_id
+            self.next_modal = next_modal
+
+        @discord.ui.button(label='Continue to Step 2', style=discord.ButtonStyle.blurple)
+        async def open_step_two(self, button_interaction: discord.Interaction, button: discord.ui.Button):
+            if button_interaction.user.id != self.author_id:
+                await button_interaction.response.send_message('Only the original author can continue this stadium update.', ephemeral=True)
+                return
+
+            button.disabled = True
+            try:
+                await button_interaction.response.send_modal(self.next_modal)
+            except Exception as e:
+                print(f'Error opening stadium step-2 modal: {e}')
+                await button_interaction.response.send_message('Could not open step 2 modal. Please run /add-stadiuminfo again.', ephemeral=True)
+                return
+
+            try:
+                await button_interaction.message.edit(view=self)
+            except Exception:
+                pass
+
+    class StadiumInfoStepTwoModal(discord.ui.Modal, title=f"Stadium Plan for {club}"):
+        plan_image_url = discord.ui.TextInput(
+            label="Stadium plan image URL",
+            style=discord.TextStyle.short,
+            required=False,
+            placeholder="https://example.com/stadium-plan.jpg"
+        )
+        block_description = discord.ui.TextInput(
+            label="Block description",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=1000,
+            placeholder="Describe blocks / sectors and where they are located."
+        )
+        how_to_get_there = discord.ui.TextInput(
+            label="How to get there",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=1000,
+            placeholder="Transport and access information."
+        )
+
+        def __init__(self, club_name, club_id, stadium_id, first_data):
+            super().__init__()
+            self.club_name = club_name
+            self.club_id = club_id
+            self.stadium_id = stadium_id
+            self.first_data = first_data
+
+        async def on_submit(self, modal_interaction: discord.Interaction):
+            plan_url = self.plan_image_url.value.strip()
+            block_desc = self.block_description.value.strip()
+            route_info = self.how_to_get_there.value.strip()
+
+            if plan_url and not re.match(r'^https?://', plan_url):
+                await modal_interaction.response.send_message('Invalid stadium plan URL (must start with http:// or https://).', ephemeral=True)
+                return
+
+            try:
+                result = db.update_stadium_info_partial(
+                    self.stadium_id,
+                    name=self.first_data.get('name'),
+                    image_url=self.first_data.get('image_url'),
+                    capacity=self.first_data.get('capacity'),
+                    built_year=self.first_data.get('built_year'),
+                    plan_image_url=plan_url if plan_url else None,
+                    block_description=block_desc if block_desc else None,
+                    how_to_get_there=route_info if route_info else None,
+                )
+                db.link_club_to_stadium(self.club_id, self.stadium_id)
+            except Exception as e:
+                print(f'Error updating stadium info: {e}')
+                await modal_interaction.response.send_message('Error saving stadium information.', ephemeral=True)
+                return
+
+            updated_fields = result.get('updated_fields', [])
+            overwritten_fields = result.get('overwritten_fields', [])
+            if updated_fields:
+                msg = f"✅ Stadium information for {self.club_name} has been saved. Updated: {', '.join(updated_fields)}."
+            else:
+                msg = f"ℹ️ No stadium fields changed for {self.club_name}. Empty fields were ignored."
+
+            if overwritten_fields:
+                msg += f"\n⚠️ Existing values were overwritten for: {', '.join(overwritten_fields)}."
+
+            await modal_interaction.response.send_message(msg, ephemeral=True)
+            try:
+                await show_club_info(modal_interaction, self.club_name)
+            except Exception:
+                pass
+
+    class StadiumInfoStepOneModal(discord.ui.Modal, title=f"Stadium for {club}"):
+        name = discord.ui.TextInput(
+            label="Stadium name",
+            style=discord.TextStyle.short,
+            required=False,
+            max_length=200,
+            placeholder="e.g. San Siro"
+        )
+        image_url = discord.ui.TextInput(
+            label="Stadium image URL",
+            style=discord.TextStyle.short,
+            required=False,
+            placeholder="https://example.com/stadium.jpg"
+        )
+        capacity = discord.ui.TextInput(
+            label="Capacity",
+            style=discord.TextStyle.short,
+            required=False,
+            placeholder="e.g. 75817"
+        )
+        built_year = discord.ui.TextInput(
+            label="Built year",
+            style=discord.TextStyle.short,
+            required=False,
+            placeholder="e.g. 1926"
+        )
+
+        def __init__(self, club_name, club_id, existing_stadium):
+            super().__init__()
+            self.club_name = club_name
+            self.club_id = club_id
+            self.existing_stadium = existing_stadium
+
+        async def on_submit(self, modal_interaction: discord.Interaction):
+            stadium_name = self.name.value.strip()
+            image_url = self.image_url.value.strip()
+            capacity_text = self.capacity.value.strip()
+            built_year_text = self.built_year.value.strip()
+
+            if image_url and not re.match(r'^https?://', image_url):
+                await modal_interaction.response.send_message('Invalid stadium image URL (must start with http:// or https://).', ephemeral=True)
+                return
+
+            parsed_capacity = None
+            if capacity_text:
+                if not capacity_text.isdigit() or int(capacity_text) <= 0:
+                    await modal_interaction.response.send_message('Capacity must be a positive integer.', ephemeral=True)
+                    return
+                parsed_capacity = int(capacity_text)
+
+            parsed_built_year = None
+            if built_year_text:
+                if not built_year_text.isdigit():
+                    await modal_interaction.response.send_message('Built year must be a valid year.', ephemeral=True)
+                    return
+                parsed_built_year = int(built_year_text)
+                if parsed_built_year < 1000 or parsed_built_year > 2100:
+                    await modal_interaction.response.send_message('Built year must be between 1000 and 2100.', ephemeral=True)
+                    return
+
+            stadium_id = None
+            if stadium_name:
+                try:
+                    stadium_id = db.get_or_create_stadium(stadium_name)
+                except Exception as e:
+                    print(f'Error creating/finding stadium: {e}')
+                    await modal_interaction.response.send_message('Could not create or resolve stadium name.', ephemeral=True)
+                    return
+            elif self.existing_stadium and self.existing_stadium.get('stadium_id'):
+                stadium_id = self.existing_stadium['stadium_id']
+            else:
+                await modal_interaction.response.send_message('Please enter a stadium name (required for first-time setup).', ephemeral=True)
+                return
+
+            first_data = {
+                'name': stadium_name if stadium_name else None,
+                'image_url': image_url if image_url else None,
+                'capacity': parsed_capacity,
+                'built_year': parsed_built_year,
+            }
+
+            next_modal = StadiumInfoStepTwoModal(
+                club_name=self.club_name,
+                club_id=self.club_id,
+                stadium_id=stadium_id,
+                first_data=first_data,
+            )
+            launcher_view = StadiumInfoStepTwoLauncherView(
+                author_id=modal_interaction.user.id,
+                next_modal=next_modal,
+            )
+            await modal_interaction.response.send_message(
+                'Step 1 saved. Click the button below to continue with step 2 (stadium plan details).',
+                view=launcher_view,
+                ephemeral=True,
+            )
+
+    modal = StadiumInfoStepOneModal(club, club_id, existing_stadium)
     try:
         await interaction.response.send_modal(modal)
     except Exception:
