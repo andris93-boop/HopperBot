@@ -508,6 +508,58 @@ async def _post_member_list(guild):
 async def ping(ctx):
     await ctx.send(f'Yes, {ctx.author.mention}, I\'m here ! :robot: :saluting_face: ({version})')
 
+
+async def migrate_users_without_club_to_newcomer(guild: discord.Guild):
+    """Ensure legacy users without a club are moved to newcomer role."""
+    newcomer_role = guild.get_role(NEWCOMER_ROLE_ID) if NEWCOMER_ROLE_ID else None
+    apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+
+    if newcomer_role is None:
+        print(f'Newcomer role with ID {NEWCOMER_ROLE_ID} not found. Skipping migration.')
+        return
+
+    migrated_count = 0
+    checked_count = 0
+
+    for member in guild.members:
+        if member.bot:
+            continue
+        checked_count += 1
+
+        try:
+            club_id, _ = db.get_user_profile(guild.id, member.id)
+        except Exception as e:
+            print(f'Error checking profile for {member.id}: {e}')
+            continue
+
+        if club_id:
+            continue
+
+        roles_to_remove = []
+        if apprentice_role and apprentice_role in member.roles:
+            roles_to_remove.append(apprentice_role)
+        for rid in EXCLUSIVE_ACTIVITY_ROLE_IDS:
+            role_obj = guild.get_role(rid)
+            if role_obj and role_obj in member.roles:
+                roles_to_remove.append(role_obj)
+
+        changed = False
+        try:
+            if roles_to_remove:
+                await member.remove_roles(*roles_to_remove, reason='No club set: move member to newcomer')
+                changed = True
+            if newcomer_role not in member.roles:
+                await member.add_roles(newcomer_role, reason='No club set: move member to newcomer')
+                changed = True
+        except Exception as e:
+            print(f'Error migrating member {member.id} to newcomer: {e}')
+            continue
+
+        if changed:
+            migrated_count += 1
+
+    print(f'Newcomer migration completed. Checked={checked_count}, migrated={migrated_count}')
+
 @bot.event
 async def on_ready():
     print(f'{bot.user} is logged in!')
@@ -525,6 +577,12 @@ async def on_ready():
     if not guild:
         print(f'Server with ID {GUILD_ID} not found.')
         return
+
+    # Migration: move legacy users without a club to newcomer role
+    try:
+        await migrate_users_without_club_to_newcomer(guild)
+    except Exception as e:
+        print(f'Error during newcomer migration: {e}')
 
     # Post the member list
     await post_member_list(guild)
