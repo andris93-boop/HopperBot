@@ -1939,6 +1939,121 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
 
     existing_stadium = format_stadium_info(db.get_stadium_info_for_club(club_id))
 
+    field_labels = {
+        'name': 'Name',
+        'image_url': 'Stadium Image URL',
+        'capacity': 'Capacity',
+        'built_year': 'Built Year',
+        'plan_image_url': 'Stadium Plan Image URL',
+        'block_description': 'Block Description',
+        'how_to_get_there': 'How To Get There',
+    }
+
+    def _display_value(value):
+        if value in (None, ''):
+            return '—'
+        return str(value)
+
+    class StadiumFieldReviewView(discord.ui.View):
+        def __init__(
+            self,
+            author_id: int,
+            club_name: str,
+            club_id: int,
+            stadium_id: int,
+            current_data: dict,
+            proposed_data: dict,
+            changed_fields: list[str],
+        ):
+            super().__init__(timeout=600)
+            self.author_id = author_id
+            self.club_name = club_name
+            self.club_id = club_id
+            self.stadium_id = stadium_id
+            self.current_data = current_data
+            self.proposed_data = proposed_data
+            self.changed_fields = changed_fields
+            self.index = 0
+            self.confirmed_fields = []
+            self.discarded_fields = []
+
+        def build_embed(self):
+            field_key = self.changed_fields[self.index]
+            old_value = self.current_data.get(field_key)
+            new_value = self.proposed_data.get(field_key)
+
+            embed = discord.Embed(
+                title=f'Stadium Update Review — {self.club_name}',
+                color=discord.Color.orange()
+            )
+            embed.description = (
+                f'Field {self.index + 1}/{len(self.changed_fields)}\n'
+                f'Choose **Confirm** to apply the new value or **Discard** to keep the current value.'
+            )
+            embed.add_field(name='Field', value=field_labels.get(field_key, field_key), inline=False)
+            embed.add_field(name='Current', value=_display_value(old_value), inline=False)
+            embed.add_field(name='New', value=_display_value(new_value), inline=False)
+            return embed
+
+        async def _finish(self, interaction_obj: discord.Interaction):
+            update_kwargs = {}
+            for field_key in self.confirmed_fields:
+                update_kwargs[field_key] = self.proposed_data.get(field_key)
+
+            try:
+                if update_kwargs:
+                    db.update_stadium_info_partial(self.stadium_id, **update_kwargs)
+                db.link_club_to_stadium(self.club_id, self.stadium_id)
+            except Exception as e:
+                print(f'Error applying reviewed stadium updates: {e}')
+                await interaction_obj.response.send_message('Error saving stadium information after review.', ephemeral=True)
+                return
+
+            for child in self.children:
+                child.disabled = True
+            try:
+                await interaction_obj.message.edit(view=self)
+            except Exception:
+                pass
+
+            changed_text = ', '.join(field_labels.get(f, f) for f in self.confirmed_fields) if self.confirmed_fields else 'none'
+            kept_text = ', '.join(field_labels.get(f, f) for f in self.discarded_fields) if self.discarded_fields else 'none'
+            await interaction_obj.response.send_message(
+                f'✅ Review finished for {self.club_name}.\nApplied: {changed_text}\nKept existing: {kept_text}',
+                ephemeral=True
+            )
+
+            try:
+                await show_club_info(interaction_obj, self.club_name)
+            except Exception:
+                pass
+
+        async def _handle_decision(self, button_interaction: discord.Interaction, confirm: bool):
+            if button_interaction.user.id != self.author_id:
+                await button_interaction.response.send_message('Only the original author can confirm or discard these changes.', ephemeral=True)
+                return
+
+            field_key = self.changed_fields[self.index]
+            if confirm:
+                self.confirmed_fields.append(field_key)
+            else:
+                self.discarded_fields.append(field_key)
+
+            self.index += 1
+            if self.index >= len(self.changed_fields):
+                await self._finish(button_interaction)
+                return
+
+            await button_interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+        @discord.ui.button(label='Confirm', style=discord.ButtonStyle.green)
+        async def confirm_button(self, button_interaction: discord.Interaction, button: discord.ui.Button):
+            await self._handle_decision(button_interaction, confirm=True)
+
+        @discord.ui.button(label='Discard', style=discord.ButtonStyle.grey)
+        async def discard_button(self, button_interaction: discord.Interaction, button: discord.ui.Button):
+            await self._handle_decision(button_interaction, confirm=False)
+
     class StadiumInfoStepTwoLauncherView(discord.ui.View):
         def __init__(self, author_id: int, next_modal: discord.ui.Modal):
             super().__init__(timeout=300)
@@ -2002,38 +2117,60 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
                 await modal_interaction.response.send_message('Invalid stadium plan URL (must start with http:// or https://).', ephemeral=True)
                 return
 
-            try:
-                result = db.update_stadium_info_partial(
-                    self.stadium_id,
-                    name=self.first_data.get('name'),
-                    image_url=self.first_data.get('image_url'),
-                    capacity=self.first_data.get('capacity'),
-                    built_year=self.first_data.get('built_year'),
-                    plan_image_url=plan_url if plan_url else None,
-                    block_description=block_desc if block_desc else None,
-                    how_to_get_there=route_info if route_info else None,
-                )
-                db.link_club_to_stadium(self.club_id, self.stadium_id)
-            except Exception as e:
-                print(f'Error updating stadium info: {e}')
-                await modal_interaction.response.send_message('Error saving stadium information.', ephemeral=True)
+            current_data = format_stadium_info(db.get_stadium_info(self.stadium_id))
+            if not current_data:
+                await modal_interaction.response.send_message('Could not load current stadium data for review.', ephemeral=True)
                 return
 
-            updated_fields = result.get('updated_fields', [])
-            overwritten_fields = result.get('overwritten_fields', [])
-            if updated_fields:
-                msg = f"✅ Stadium information for {self.club_name} has been saved. Updated: {', '.join(updated_fields)}."
-            else:
-                msg = f"ℹ️ No stadium fields changed for {self.club_name}. Empty fields were ignored."
+            proposed_data = {
+                'name': self.first_data.get('name'),
+                'image_url': self.first_data.get('image_url'),
+                'capacity': self.first_data.get('capacity'),
+                'built_year': self.first_data.get('built_year'),
+                'plan_image_url': plan_url if plan_url else None,
+                'block_description': block_desc if block_desc else None,
+                'how_to_get_there': route_info if route_info else None,
+            }
 
-            if overwritten_fields:
-                msg += f"\n⚠️ Existing values were overwritten for: {', '.join(overwritten_fields)}."
+            changed_fields = []
+            for field_key, new_value in proposed_data.items():
+                if new_value is None:
+                    continue
+                if new_value != current_data.get(field_key):
+                    changed_fields.append(field_key)
 
-            await modal_interaction.response.send_message(msg, ephemeral=True)
-            try:
-                await show_club_info(modal_interaction, self.club_name)
-            except Exception:
-                pass
+            if not changed_fields:
+                try:
+                    db.link_club_to_stadium(self.club_id, self.stadium_id)
+                except Exception as e:
+                    print(f'Error linking club to stadium without field changes: {e}')
+                    await modal_interaction.response.send_message('No fields changed, and linking failed.', ephemeral=True)
+                    return
+
+                await modal_interaction.response.send_message(
+                    f'ℹ️ No stadium fields changed for {self.club_name}. Empty fields were ignored and existing values were kept.',
+                    ephemeral=True
+                )
+                try:
+                    await show_club_info(modal_interaction, self.club_name)
+                except Exception:
+                    pass
+                return
+
+            review_view = StadiumFieldReviewView(
+                author_id=modal_interaction.user.id,
+                club_name=self.club_name,
+                club_id=self.club_id,
+                stadium_id=self.stadium_id,
+                current_data=current_data,
+                proposed_data=proposed_data,
+                changed_fields=changed_fields,
+            )
+            await modal_interaction.response.send_message(
+                embed=review_view.build_embed(),
+                view=review_view,
+                ephemeral=True,
+            )
 
     class StadiumInfoStepOneModal(discord.ui.Modal, title=f"Stadium for {club}"):
         name = discord.ui.TextInput(
@@ -2096,15 +2233,15 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
                     return
 
             stadium_id = None
-            if stadium_name:
+            if self.existing_stadium and self.existing_stadium.get('stadium_id'):
+                stadium_id = self.existing_stadium['stadium_id']
+            elif stadium_name:
                 try:
                     stadium_id = db.get_or_create_stadium(stadium_name)
                 except Exception as e:
                     print(f'Error creating/finding stadium: {e}')
                     await modal_interaction.response.send_message('Could not create or resolve stadium name.', ephemeral=True)
                     return
-            elif self.existing_stadium and self.existing_stadium.get('stadium_id'):
-                stadium_id = self.existing_stadium['stadium_id']
             else:
                 await modal_interaction.response.send_message('Please enter a stadium name (required for first-time setup).', ephemeral=True)
                 return
