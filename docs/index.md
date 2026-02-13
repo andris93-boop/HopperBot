@@ -12,6 +12,17 @@ ATTENTION: The bot will rewrite the line-up message every time something changes
 
 Clubs that appear only because at least one user marked them as an expert (no regular members) will still be shown in the lineup and will display their club logo if available. The bot appends a medal emoji after a user's mention to indicate their relation to the club: gold (🥇) for home club members, silver (🥈) for experts.
 
+## Social media link fixer
+
+If a message contains supported social media links with poor embeds, the bot automatically rewrites these links to embed-friendly versions and reposts the message.
+
+The repost keeps the relevant context:
+- it includes a "Posted by @user" hint,
+- it keeps the original message text,
+- and it keeps attachment links.
+
+After reposting, the bot removes the original message (if it has permission), so the channel does not contain duplicate unfixed/fixed links.
+
 ## Tracking Activity Status
 
 Every time a user sends a message, the bot counts it. The only data that is stored is: user ID, date, and number of entries. For assigning activity statuses, only the last two weeks are considered. Three different statuses can be achieved:
@@ -81,7 +92,8 @@ Because Discord modals are limited to 5 fields, the input is split into two moda
 
 Rules:
 - Empty fields do not overwrite existing values.
-- If you enter a new value for an existing field, the bot shows a warning that this field was overwritten.
+- New values for previously empty fields are applied directly (no confirmation needed).
+- If you change a field that already has a value, the bot opens a per-field review and asks if you want to **Confirm** (apply new value) or **Discard** (keep old value).
 - Stadiums are stored separately and can be shared by multiple clubs.
 
 ## /set-clubicon
@@ -97,12 +109,12 @@ This command allows to set a club's embed color so the club's messages and embed
 - Provide a hex color value in the form `#RRGGBB` (e.g. `#FF4500`).
 
 ## Expert clubs (/add-expert-club, /remove-expert-club)
-These commands let users mark clubs they are an expert for (up to 4 clubs per user).
+These commands let users mark clubs they are an expert for (up to 10 clubs per user).
 - `/add-expert-club`: Select a country and a club to mark it as one you are an expert for.
 - `/remove-expert-club`: Remove a previously added expert club.
 
 Notes:
-- Expert clubs are limited to 4 entries per user. Expert clubs and expert users are already visible in user profiles, the server-wide lineup, and in the `/club` view under the "Experts" field.
+- Expert clubs are limited to 10 entries per user. Expert clubs and expert users are already visible in user profiles, the server-wide lineup, and in the `/club` view under the "Experts" field.
 
 ## /add-tags and /tags
 These commands allow you to manage tags on your profile.
