@@ -69,6 +69,16 @@ MAX_MENTIONS = 10
 # When True the bot will try to create a thread for the groundhelp request (requires permissions)
 CREATE_THREAD_ON_PING = False
 
+# Active membership applications per user (one in progress at a time)
+# Structure:
+# { applicant_id: {
+#     'application_channel_id': int,
+#     'application_message_id': int,
+#     'verification_channel_id': int,
+#     'verification_message_id': int
+# } }
+ACTIVE_MEMBERSHIP_APPLICATIONS = {}
+
 
 class ConfirmPingView(discord.ui.View):
     def __init__(self, author, channel, mentions, public_embed, allowed_mentions, matched_query):
@@ -154,6 +164,7 @@ class MembershipDenyReasonModal(discord.ui.Modal, title='Deny Application'):
 
         await self.review_view._delete_application_message(guild)
         await self.review_view._delete_verification_message(guild, self.verification_channel_id, self.verification_message_id)
+        self.review_view._clear_active_application()
 
         if member is not None:
             await interaction.followup.send(f'Denied application for {member.mention}. Applicant DM {dm_status}.', ephemeral=True)
@@ -167,6 +178,9 @@ class MembershipReviewView(discord.ui.View):
         self.applicant_id = applicant_id
         self.application_channel_id = application_channel_id
         self.application_message_id = application_message_id
+
+    def _clear_active_application(self):
+        ACTIVE_MEMBERSHIP_APPLICATIONS.pop(self.applicant_id, None)
 
     async def _delete_application_message(self, guild: discord.Guild):
         try:
@@ -230,6 +244,7 @@ class MembershipReviewView(discord.ui.View):
 
         await self._delete_application_message(guild)
         await self._delete_verification_message(guild, interaction.channel.id, interaction.message.id)
+        self._clear_active_application()
 
         await interaction.followup.send(
             f'Approved application for {member.mention}. Role set to Casual. Applicant DM {dm_status}.',
@@ -248,6 +263,53 @@ class MembershipReviewView(discord.ui.View):
             verification_message_id=interaction.message.id
         )
         await interaction.response.send_modal(modal)
+
+
+class MembershipApplicationView(discord.ui.View):
+    def __init__(self, applicant_id: int, application_channel_id: int, application_message_id: int):
+        super().__init__(timeout=None)
+        self.applicant_id = applicant_id
+        self.application_channel_id = application_channel_id
+        self.application_message_id = application_message_id
+        self.verification_channel_id = None
+        self.verification_message_id = None
+
+    def set_verification_message(self, verification_channel_id: int, verification_message_id: int):
+        self.verification_channel_id = verification_channel_id
+        self.verification_message_id = verification_message_id
+
+    async def _delete_message(self, guild: discord.Guild, channel_id: int | None, message_id: int | None):
+        if not channel_id or not message_id:
+            return
+        try:
+            channel = guild.get_channel(channel_id) or bot.get_channel(channel_id)
+            if channel is None:
+                return
+            msg = await channel.fetch_message(message_id)
+            await msg.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f'Error deleting message {message_id} in channel {channel_id}: {e}')
+
+    @discord.ui.button(label='Abort', style=discord.ButtonStyle.red)
+    async def abort(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message('Guild not available.', ephemeral=True)
+            return
+
+        if interaction.user.id != self.applicant_id and not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message('Only the applicant can abort this application.', ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        await self._delete_message(guild, self.application_channel_id, self.application_message_id)
+        await self._delete_message(guild, self.verification_channel_id, self.verification_message_id)
+        ACTIVE_MEMBERSHIP_APPLICATIONS.pop(self.applicant_id, None)
+
+        await interaction.followup.send('Application aborted and removed.', ephemeral=True)
 
 
 def nbsp(text):
@@ -552,6 +614,20 @@ async def on_message(message):
             if guild is None:
                 return
 
+            # Allow only one active application per apprentice
+            existing = ACTIVE_MEMBERSHIP_APPLICATIONS.get(message.author.id)
+            if existing:
+                warning = await message.channel.send('application already in progress. abort current application to send a new one')
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                try:
+                    await warning.delete(delay=10)
+                except Exception:
+                    pass
+                return
+
             apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
             if apprentice_role is None or apprentice_role not in message.author.roles:
                 await message.reply('Only users with the Apprentice role can apply here.', mention_author=False)
@@ -567,24 +643,54 @@ async def on_message(message):
                 print(f'Mod verification channel with ID {MOD_VERFICATION_CHANNEL_ID} not found.')
                 return
 
-            embed = discord.Embed(title='Membership Application', color=discord.Color.gold(), timestamp=message.created_at)
-            embed.add_field(name='Applicant', value=f'{message.author.mention} ({message.author.id})', inline=False)
-            embed.add_field(name='Original Message', value=f'[Jump to message]({message.jump_url})', inline=False)
-            embed.add_field(name='Text', value=message.content if message.content else '(no text)', inline=False)
-
+            attachment_lines = []
             if message.attachments:
-                attachment_lines = []
                 for attachment in message.attachments:
                     attachment_lines.append(f'[{attachment.filename}]({attachment.url})')
-                embed.add_field(name='Attachments', value='\n'.join(attachment_lines), inline=False)
+
+            # Repost application by bot in membership channel with status pending
+            app_embed = discord.Embed(title='Membership Application', color=discord.Color.orange(), timestamp=message.created_at)
+            app_embed.add_field(name='Status', value='pending', inline=False)
+            app_embed.add_field(name='Applicant', value=f'{message.author.mention} ({message.author.id})', inline=False)
+            app_embed.add_field(name='Text', value=message.content if message.content else '(no text)', inline=False)
+            if attachment_lines:
+                app_embed.add_field(name='Attachments', value='\n'.join(attachment_lines), inline=False)
+
+            app_view = MembershipApplicationView(
+                applicant_id=message.author.id,
+                application_channel_id=message.channel.id,
+                application_message_id=0
+            )
+            reposted = await message.channel.send(embed=app_embed, view=app_view, allowed_mentions=discord.AllowedMentions.none())
+            app_view.application_message_id = reposted.id
+
+            # Forward reposted application to mod verification
+            mod_embed = discord.Embed(title='Membership Application', color=discord.Color.gold(), timestamp=message.created_at)
+            mod_embed.add_field(name='Applicant', value=f'{message.author.mention} ({message.author.id})', inline=False)
+            mod_embed.add_field(name='Application Message', value=f'[Jump to message]({reposted.jump_url})', inline=False)
+            mod_embed.add_field(name='Text', value=message.content if message.content else '(no text)', inline=False)
+            if attachment_lines:
+                mod_embed.add_field(name='Attachments', value='\n'.join(attachment_lines), inline=False)
 
             review_view = MembershipReviewView(
                 applicant_id=message.author.id,
                 application_channel_id=message.channel.id,
-                application_message_id=message.id
+                application_message_id=reposted.id
             )
-            await mod_channel.send(embed=embed, view=review_view, allowed_mentions=discord.AllowedMentions.none())
-            await message.add_reaction('📨')
+            verification_msg = await mod_channel.send(embed=mod_embed, view=review_view, allowed_mentions=discord.AllowedMentions.none())
+
+            app_view.set_verification_message(mod_channel.id, verification_msg.id)
+            ACTIVE_MEMBERSHIP_APPLICATIONS[message.author.id] = {
+                'application_channel_id': message.channel.id,
+                'application_message_id': reposted.id,
+                'verification_channel_id': mod_channel.id,
+                'verification_message_id': verification_msg.id,
+            }
+
+            try:
+                await message.delete()
+            except Exception:
+                pass
         except Exception as e:
             print(f'Error forwarding membership application: {e}')
 
