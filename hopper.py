@@ -16,7 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 ENV_PATH = Path(__file__).resolve().parent / '.env'
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
-version = "1.6.1"
+version = "1.7.0"
 
 # Filled after slash-command sync; falls back to plain command text.
 SET_CLUB_COMMAND_MENTION = '/set-club'
@@ -1044,6 +1044,61 @@ async def on_message(message):
     # Membership application channel: forward apprentice applications to mod verification channel
     if message.channel.id == MEMBERSHIP_APPLICATION_CHANNEL_ID:
         try:
+            def _is_image_attachment(attachment: discord.Attachment) -> bool:
+                content_type = (attachment.content_type or '').lower()
+                if content_type.startswith('image/'):
+                    return True
+                filename = (attachment.filename or '').lower()
+                return filename.endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'))
+
+            async def _build_membership_embeds_and_files(base_embed: discord.Embed, attachments):
+                embeds = [base_embed]
+                files = []
+                non_image_names = []
+                used_filenames = set()
+                image_embed_count = 1  # base embed counts as first embed
+
+                for index, attachment in enumerate(attachments, start=1):
+                    filename = attachment.filename or f'attachment-{index}'
+                    if filename in used_filenames:
+                        stem, dot, suffix = filename.rpartition('.')
+                        stem = stem or filename
+                        counter = 2
+                        while filename in used_filenames:
+                            if dot:
+                                filename = f'{stem}-{counter}.{suffix}'
+                            else:
+                                filename = f'{stem}-{counter}'
+                            counter += 1
+                    used_filenames.add(filename)
+
+                    try:
+                        copied_file = await attachment.to_file(filename=filename, use_cached=True)
+                        files.append(copied_file)
+                    except Exception as copy_error:
+                        print(f'Error copying attachment {attachment.filename}: {copy_error}')
+                        non_image_names.append(f'{filename} (copy failed)')
+                        continue
+
+                    if _is_image_attachment(attachment):
+                        image_url = f'attachment://{filename}'
+                        if base_embed.image.url is None:
+                            base_embed.set_image(url=image_url)
+                        elif image_embed_count < 10:
+                            image_embed = discord.Embed(color=base_embed.color, timestamp=base_embed.timestamp)
+                            image_embed.set_image(url=image_url)
+                            embeds.append(image_embed)
+                            image_embed_count += 1
+                        else:
+                            non_image_names.append(f'{filename} (not shown: max 10 embeds)')
+                    else:
+                        non_image_names.append(filename)
+
+                if non_image_names:
+                    base_embed.add_field(name='Attachments', value='\n'.join(non_image_names), inline=False)
+
+                return embeds, files
+
             guild = message.guild
             if guild is None:
                 return
@@ -1077,25 +1132,24 @@ async def on_message(message):
                 print(f'Mod verification channel with ID {MOD_VERFICATION_CHANNEL_ID} not found.')
                 return
 
-            attachment_lines = []
-            if message.attachments:
-                for attachment in message.attachments:
-                    attachment_lines.append(f'[{attachment.filename}]({attachment.url})')
-
             # Repost application by bot in membership channel with status pending
             app_embed = discord.Embed(title='Membership Application', color=discord.Color.orange(), timestamp=message.created_at)
             app_embed.add_field(name='Status', value='pending', inline=False)
             app_embed.add_field(name='Applicant', value=f'{message.author.mention} ({message.author.id})', inline=False)
             app_embed.add_field(name='Text', value=message.content if message.content else '(no text)', inline=False)
-            if attachment_lines:
-                app_embed.add_field(name='Attachments', value='\n'.join(attachment_lines), inline=False)
+            app_embeds, app_files = await _build_membership_embeds_and_files(app_embed, message.attachments)
 
             app_view = MembershipApplicationView(
                 applicant_id=message.author.id,
                 application_channel_id=message.channel.id,
                 application_message_id=0
             )
-            reposted = await message.channel.send(embed=app_embed, view=app_view, allowed_mentions=discord.AllowedMentions.none())
+            reposted = await message.channel.send(
+                embeds=app_embeds,
+                files=app_files,
+                view=app_view,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
             app_view.application_message_id = reposted.id
 
             # Forward reposted application to mod verification
@@ -1103,15 +1157,19 @@ async def on_message(message):
             mod_embed.add_field(name='Applicant', value=f'{message.author.mention} ({message.author.id})', inline=False)
             mod_embed.add_field(name='Application Message', value=f'[Jump to message]({reposted.jump_url})', inline=False)
             mod_embed.add_field(name='Text', value=message.content if message.content else '(no text)', inline=False)
-            if attachment_lines:
-                mod_embed.add_field(name='Attachments', value='\n'.join(attachment_lines), inline=False)
+            mod_embeds, mod_files = await _build_membership_embeds_and_files(mod_embed, message.attachments)
 
             review_view = MembershipReviewView(
                 applicant_id=message.author.id,
                 application_channel_id=message.channel.id,
                 application_message_id=reposted.id
             )
-            verification_msg = await mod_channel.send(embed=mod_embed, view=review_view, allowed_mentions=discord.AllowedMentions.none())
+            verification_msg = await mod_channel.send(
+                embeds=mod_embeds,
+                files=mod_files,
+                view=review_view,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
 
             app_view.set_verification_message(mod_channel.id, verification_msg.id)
             ACTIVE_MEMBERSHIP_APPLICATIONS[message.author.id] = {

@@ -1,11 +1,12 @@
-Release 1.2
-- Zweitclub hinzufügen
-- /trip
-- /league zum Anzeigen einer Liga mit Mitgliedern
+1.7
+fix picture display bug in membership request
+add ticketing info wie add stadium info
+later
+Tippspiel
+
 
 
 später
 - "titel" die bei erreichen bestimmter kondition freigeschaltet werden. z.b. "Field reporter" bei 100 reaktionen auf eigene beiträge im Channel "Matchday"
-- Datenbank erweitern (Stadion, Ticketing info, Einlass, Anreise, klassische Stadion Speise)
 - Vereinsnamen unter dem namen anzeigen
 - the random game
