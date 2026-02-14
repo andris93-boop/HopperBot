@@ -2075,11 +2075,136 @@ async def show_club_info(interaction: discord.Interaction, club: str):
 @app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
 async def add_ticketinginfo_command(interaction: discord.Interaction, country: str, club: str):
     """Opens a modal to set ticketing notes and URL for a club."""
-    # Attempt to open a modal directly
     club_id = db.get_club_id_by_name(club)
     if not club_id:
         await interaction.response.send_message(f"❌ Club '{club}' not found.", ephemeral=True)
         return
+
+    field_labels = {
+        'ticket_notes': 'Ticket Notes',
+        'ticket_url': 'Ticket URL',
+    }
+
+    def _display_value(value):
+        if value in (None, ''):
+            return '—'
+        return str(value)
+
+    def _get_current_ticket_data(target_club_id: int):
+        club_info = db.get_club_info(target_club_id)
+        notes = club_info[9] if club_info and len(club_info) > 9 else None
+        url = club_info[10] if club_info and len(club_info) > 10 else None
+        return {
+            'ticket_notes': notes,
+            'ticket_url': url,
+        }
+
+    def _apply_ticket_update(target_club_id: int, current_data: dict, proposed_data: dict, fields_to_apply: list[str]):
+        ticket_notes = current_data.get('ticket_notes')
+        ticket_url = current_data.get('ticket_url')
+
+        if 'ticket_notes' in fields_to_apply:
+            ticket_notes = proposed_data.get('ticket_notes')
+        if 'ticket_url' in fields_to_apply:
+            ticket_url = proposed_data.get('ticket_url')
+
+        db.update_club_ticket_info(target_club_id, ticket_notes, ticket_url)
+
+    class TicketFieldReviewView(discord.ui.View):
+        def __init__(
+            self,
+            author_id: int,
+            club_name: str,
+            club_id: int,
+            current_data: dict,
+            proposed_data: dict,
+            changed_fields: list[str],
+            auto_apply_fields: list[str],
+        ):
+            super().__init__(timeout=600)
+            self.author_id = author_id
+            self.club_name = club_name
+            self.club_id = club_id
+            self.current_data = current_data
+            self.proposed_data = proposed_data
+            self.changed_fields = changed_fields
+            self.auto_apply_fields = auto_apply_fields
+            self.index = 0
+            self.confirmed_fields = []
+            self.discarded_fields = []
+
+        def build_embed(self):
+            field_key = self.changed_fields[self.index]
+            old_value = self.current_data.get(field_key)
+            new_value = self.proposed_data.get(field_key)
+
+            embed = discord.Embed(
+                title=f'Ticketing Update Review — {self.club_name}',
+                color=discord.Color.orange()
+            )
+            embed.description = (
+                f'Field {self.index + 1}/{len(self.changed_fields)}\n'
+                f'Choose **Confirm** to overwrite existing information with the new value or **Discard** to keep the current value.'
+            )
+            embed.add_field(name='Field', value=field_labels.get(field_key, field_key), inline=False)
+            embed.add_field(name='Current', value=_display_value(old_value), inline=False)
+            embed.add_field(name='New', value=_display_value(new_value), inline=False)
+            return embed
+
+        async def _finish(self, interaction_obj: discord.Interaction):
+            fields_to_apply = list(self.auto_apply_fields) + list(self.confirmed_fields)
+            try:
+                _apply_ticket_update(self.club_id, self.current_data, self.proposed_data, fields_to_apply)
+            except Exception as e:
+                print(f'Error applying reviewed ticket updates: {e}')
+                await interaction_obj.response.send_message('Error saving ticket information after review.', ephemeral=True)
+                return
+
+            for child in self.children:
+                child.disabled = True
+            try:
+                await interaction_obj.message.edit(view=self)
+            except Exception:
+                pass
+
+            changed_text = ', '.join(field_labels.get(f, f) for f in self.confirmed_fields) if self.confirmed_fields else 'none'
+            kept_text = ', '.join(field_labels.get(f, f) for f in self.discarded_fields) if self.discarded_fields else 'none'
+            auto_text = ', '.join(field_labels.get(f, f) for f in self.auto_apply_fields) if self.auto_apply_fields else 'none'
+            await interaction_obj.response.send_message(
+                f'✅ Review finished for {self.club_name}.\nApplied (after confirm): {changed_text}\nApplied (new fields without confirm): {auto_text}\nKept existing: {kept_text}',
+                ephemeral=True
+            )
+
+            try:
+                await show_club_info(interaction_obj, self.club_name)
+            except Exception:
+                pass
+
+        async def _handle_decision(self, button_interaction: discord.Interaction, confirm: bool):
+            if button_interaction.user.id != self.author_id:
+                await button_interaction.response.send_message('Only the original author can confirm or discard these changes.', ephemeral=True)
+                return
+
+            field_key = self.changed_fields[self.index]
+            if confirm:
+                self.confirmed_fields.append(field_key)
+            else:
+                self.discarded_fields.append(field_key)
+
+            self.index += 1
+            if self.index >= len(self.changed_fields):
+                await self._finish(button_interaction)
+                return
+
+            await button_interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+        @discord.ui.button(label='Confirm', style=discord.ButtonStyle.green)
+        async def confirm_button(self, button_interaction: discord.Interaction, button: discord.ui.Button):
+            await self._handle_decision(button_interaction, confirm=True)
+
+        @discord.ui.button(label='Discard', style=discord.ButtonStyle.grey)
+        async def discard_button(self, button_interaction: discord.Interaction, button: discord.ui.Button):
+            await self._handle_decision(button_interaction, confirm=False)
 
     class TicketModal(discord.ui.Modal, title=f"Ticketing for {club}"):
         ticket_url = discord.ui.TextInput(
@@ -2104,22 +2229,72 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
         async def on_submit(self, modal_interaction: discord.Interaction):
             url = self.ticket_url.value.strip()
             notes = self.ticket_notes.value.strip()
-            # Basic URL validation
+
             if url and not re.match(r'^https?://', url):
                 await modal_interaction.response.send_message('Invalid URL (must start with http:// or https://).', ephemeral=True)
                 return
-            try:
-                db.update_club_ticket_info(self.club_id, notes, url)
-            except Exception as e:
-                print(f'Error updating ticket info: {e}')
-                await modal_interaction.response.send_message('Error saving ticket information.', ephemeral=True)
+
+            current_data = _get_current_ticket_data(self.club_id)
+            proposed_data = {
+                'ticket_notes': notes if notes else None,
+                'ticket_url': url if url else None,
+            }
+
+            changed_fields = []
+            auto_apply_fields = []
+            for field_key, new_value in proposed_data.items():
+                if new_value is None:
+                    continue
+                if new_value != current_data.get(field_key):
+                    if current_data.get(field_key) in (None, ''):
+                        auto_apply_fields.append(field_key)
+                    else:
+                        changed_fields.append(field_key)
+
+            if not changed_fields and not auto_apply_fields:
+                await modal_interaction.response.send_message(
+                    f'ℹ️ No ticketing fields changed for {self.club_name}. Empty fields were ignored and existing values were kept.',
+                    ephemeral=True
+                )
+                try:
+                    await show_club_info(modal_interaction, self.club_name)
+                except Exception:
+                    pass
                 return
-            await modal_interaction.response.send_message(f'✅ Ticket information for {self.club_name} has been saved.', ephemeral=True)
-            # show updated club info
-            try:
-                await show_club_info(modal_interaction, self.club_name)
-            except Exception:
-                pass
+
+            if not changed_fields and auto_apply_fields:
+                try:
+                    _apply_ticket_update(self.club_id, current_data, proposed_data, auto_apply_fields)
+                except Exception as e:
+                    print(f'Error applying ticket auto fields: {e}')
+                    await modal_interaction.response.send_message('Error saving ticket information.', ephemeral=True)
+                    return
+
+                auto_text = ', '.join(field_labels.get(f, f) for f in auto_apply_fields)
+                await modal_interaction.response.send_message(
+                    f'✅ Ticket information saved for {self.club_name}. New fields applied without confirmation: {auto_text}',
+                    ephemeral=True
+                )
+                try:
+                    await show_club_info(modal_interaction, self.club_name)
+                except Exception:
+                    pass
+                return
+
+            review_view = TicketFieldReviewView(
+                author_id=modal_interaction.user.id,
+                club_name=self.club_name,
+                club_id=self.club_id,
+                current_data=current_data,
+                proposed_data=proposed_data,
+                changed_fields=changed_fields,
+                auto_apply_fields=auto_apply_fields,
+            )
+            await modal_interaction.response.send_message(
+                embed=review_view.build_embed(),
+                view=review_view,
+                ephemeral=True,
+            )
 
     modal = TicketModal(club, club_id)
     try:
@@ -2195,7 +2370,7 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
             )
             embed.description = (
                 f'Field {self.index + 1}/{len(self.changed_fields)}\n'
-                f'Choose **Confirm** to apply the new value or **Discard** to keep the current value.'
+                f'Choose **Confirm** to overwrite existing information with the new value or **Discard** to keep the current value.'
             )
             embed.add_field(name='Field', value=field_labels.get(field_key, field_key), inline=False)
             embed.add_field(name='Current', value=_display_value(old_value), inline=False)
