@@ -660,6 +660,7 @@ def _build_bot_command_overview_embed(synced_commands):
         'set-club': 'Setup & Profile',
         'profile': 'Setup & Profile',
         'club': 'Club Info',
+        'club-members': 'Club Info',
         'tags': 'Tags',
         'add-tag': 'Tags',
         'update-league': 'Club Management',
@@ -1950,6 +1951,82 @@ async def club_command(interaction: discord.Interaction,
     await interaction.response.defer()
     
     await show_club_info(interaction, club)
+
+
+# Slash command: /club-members
+@bot.tree.command(name="club-members", description="Show only club members, experts and apprentices", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(club="The club name to display")
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
+async def club_members_command(interaction: discord.Interaction,
+    country: str,
+    club: str):
+    """Shows only member-related club information."""
+    await interaction.response.defer()
+
+    await show_club_members(interaction, club)
+
+
+async def show_club_members(interaction: discord.Interaction, club: str):
+    info = format_club_info(db.get_club_info(db.get_club_id_by_name(club)))
+
+    if not info:
+        await interaction.followup.send(f"❌ Club '{club}' not found in database.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    if guild is None:
+        await interaction.followup.send('❌ Guild not available.', ephemeral=True)
+        return
+
+    members_data = db.get_members_by_club_id(guild.id, info['club_id'])
+    member_ids = set(user_id for (user_id,) in members_data)
+    apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+    apprentice_user_ids = set(m.id for m in apprentice_role.members) if apprentice_role else set()
+
+    member_mentions = []
+    apprentice_mentions = []
+    for (user_id,) in members_data:
+        member = guild.get_member(user_id)
+        if member:
+            level = db.get_user_level(user_id)
+            if user_id in apprentice_user_ids:
+                apprentice_mentions.append(f"{member.mention} {level}")
+            else:
+                member_mentions.append(f"{member.mention} {level}")
+
+    embed = embed_for_club(info)
+    embed.title = f"⚽ {info['name']}"
+    embed.description = f"**League:** {info['league']} (Tier {info['tier']})\n**Country:** {info['country']} {info['flag']}"
+    embed.add_field(
+        name=f"Members ({len(member_mentions)})",
+        value=", ".join(member_mentions) if member_mentions else "No members yet",
+        inline=False
+    )
+
+    expert_user_ids = set(db.get_expert_users_for_club(guild.id, info['club_id'])) - member_ids
+    expert_mentions = []
+    for uid in expert_user_ids:
+        member = guild.get_member(uid)
+        if member:
+            if uid in apprentice_user_ids:
+                apprentice_mentions.append(member.mention)
+            else:
+                expert_mentions.append(member.mention)
+
+    if len(expert_mentions) > 0:
+        embed.add_field(
+            name=f"Experts ({len(expert_mentions)})",
+            value=", ".join(expert_mentions),
+            inline=False
+        )
+    if len(apprentice_mentions) > 0:
+        embed.add_field(
+            name=f"Apprentice ({len(apprentice_mentions)})",
+            value=", ".join(apprentice_mentions),
+            inline=False
+        )
+
+    await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 async def show_club_info(interaction: discord.Interaction, club: str):
     # Get club information
