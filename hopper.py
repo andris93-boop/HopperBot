@@ -9,11 +9,19 @@ import asyncio
 import re
 from datetime import datetime, timedelta, time as dtime
 from database import HopperDatabase
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 # Load environment variables from .env file
-load_dotenv()
+ENV_PATH = Path(__file__).resolve().parent / '.env'
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 
-version = "1.6.1"
+version = "1.7.0"
+
+# Filled after slash-command sync; falls back to plain command text.
+SET_CLUB_COMMAND_MENTION = '/set-club'
+ADD_EXPERT_CLUB_COMMAND_MENTION = '/add-expert-club'
+SUPPORT_USER_ID = 257187622139592715
 
 # Read values from .env file
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -24,10 +32,20 @@ WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID'))
 NEWCOMER_ROLE_ID = int(os.getenv('NEWCOMER_ROLE_ID'))
 LINE_UP_CHANNEL_ID = int(os.getenv('LINE_UP_CHANNEL_ID', 0))
 GROUNDHELP_CHANNEL_ID = int(os.getenv('GROUNDHELP_CHANNEL_ID', 0))
+MEMBERSHIP_APPLICATION_CHANNEL_ID = int(os.getenv('MEMBERSHIP_APPLICATION_CHANNEL_ID', 0))
+MOD_VERFICATION_CHANNEL_ID = int(os.getenv('MOD_VERFICATION_CHANNEL_ID', 0))
+BOT_COMMAND_CHANNEL_ID = int(os.getenv('BOT_COMMAND_CHANNEL_ID', 0))
 GROUNDHOPPER_ROLE_ID = int(os.getenv('GROUNDHOPPER_ROLE_ID'))
 CASUAL_ROLE_ID = int(os.getenv('CASUAL_ROLE_ID', 0))
 FAN_ROLE_ID = int(os.getenv('FAN_ROLE_ID', 0))
 ULTRA_ROLE_ID = int(os.getenv('ULTRA_ROLE_ID', 0))
+
+# New apprentice role (optional)
+APPRENTICE_ROLE_ID = int(os.getenv('APPRENTICE_ROLE_ID') or 0)
+
+# Map groundhopper to fan on productive server (keeps backward compatibility)
+if FAN_ROLE_ID:
+    GROUNDHOPPER_ROLE_ID = FAN_ROLE_ID
 
 # Activity roles that are mutually exclusive (a user may only have one)
 EXCLUSIVE_ACTIVITY_ROLE_IDS = [r for r in (CASUAL_ROLE_ID, FAN_ROLE_ID, ULTRA_ROLE_ID) if r]
@@ -57,6 +75,22 @@ default_color = discord.Color.blue()
 MAX_MENTIONS = 10
 # When True the bot will try to create a thread for the groundhelp request (requires permissions)
 CREATE_THREAD_ON_PING = False
+
+# Active membership applications per user (one in progress at a time)
+# Structure:
+# { applicant_id: {
+#     'application_channel_id': int,
+#     'application_message_id': int,
+#     'verification_channel_id': int,
+#     'verification_message_id': int
+# } }
+ACTIVE_MEMBERSHIP_APPLICATIONS = {}
+
+# Bot-command channel overview message handling
+BOT_COMMAND_OVERVIEW_MESSAGE_ID = 0
+BOT_COMMAND_OVERVIEW_MARKER = 'hopper-bot-command-overview-v1'
+BOT_COMMAND_MESSAGE_TTL_SECONDS = 15 * 60
+ACTIVE_BOT_COMMAND_CHANNEL_ID = BOT_COMMAND_CHANNEL_ID
 
 
 class ConfirmPingView(discord.ui.View):
@@ -88,13 +122,13 @@ class ConfirmPingView(discord.ui.View):
                     print(f'Could not create thread after confirm: {e}')
         except Exception as e:
             print(f'Error sending confirmed groundhelp mentions: {e}')
-            await interaction.response.send_message('Fehler beim Senden der Nachricht.', ephemeral=True)
+            await interaction.response.send_message('Error sending the message.', ephemeral=True)
         # disable buttons
         for child in list(self.children):
             child.disabled = True
         await interaction.message.edit(view=self)
 
-    @discord.ui.button(label='Abbrechen', style=discord.ButtonStyle.grey)
+    @discord.ui.button(label='Cancel', style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.author.id:
             await interaction.response.send_message('Only the original author can cancel.', ephemeral=True)
@@ -103,6 +137,194 @@ class ConfirmPingView(discord.ui.View):
         for child in list(self.children):
             child.disabled = True
         await interaction.message.edit(view=self)
+
+
+class MembershipDenyReasonModal(discord.ui.Modal, title='Deny Application'):
+    reason = discord.ui.TextInput(
+        label='Reason for denial',
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1000,
+        placeholder='Enter the reason that should be sent to the applicant.'
+    )
+
+    def __init__(self, review_view: 'MembershipReviewView', verification_channel_id: int, verification_message_id: int):
+        super().__init__()
+        self.review_view = review_view
+        self.verification_channel_id = verification_channel_id
+        self.verification_message_id = verification_message_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message('You do not have permission to review applications.', ephemeral=True)
+            return
+
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message('Guild not available.', ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        member = guild.get_member(self.review_view.applicant_id)
+        dm_status = 'not sent'
+        if member is not None:
+            try:
+                await member.send(f'Application denied\n\nReason: {self.reason.value}')
+                dm_status = 'sent'
+            except Exception:
+                dm_status = 'failed (DM closed)'
+
+        await self.review_view._delete_application_message(guild)
+        await self.review_view._delete_verification_message(guild, self.verification_channel_id, self.verification_message_id)
+        self.review_view._clear_active_application()
+
+        if member is not None:
+            await interaction.followup.send(f'Denied application for {member.mention}. Applicant DM {dm_status}.', ephemeral=True)
+        else:
+            await interaction.followup.send('Denied application. Applicant not found in guild.', ephemeral=True)
+
+
+class MembershipReviewView(discord.ui.View):
+    def __init__(self, applicant_id: int, application_channel_id: int, application_message_id: int):
+        super().__init__(timeout=None)
+        self.applicant_id = applicant_id
+        self.application_channel_id = application_channel_id
+        self.application_message_id = application_message_id
+
+    def _clear_active_application(self):
+        ACTIVE_MEMBERSHIP_APPLICATIONS.pop(self.applicant_id, None)
+
+    async def _delete_application_message(self, guild: discord.Guild):
+        try:
+            channel = guild.get_channel(self.application_channel_id) or bot.get_channel(self.application_channel_id)
+            if channel is None:
+                return
+            msg = await channel.fetch_message(self.application_message_id)
+            await msg.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f'Error deleting application message {self.application_message_id}: {e}')
+
+    async def _delete_verification_message(self, guild: discord.Guild, channel_id: int, message_id: int):
+        try:
+            channel = guild.get_channel(channel_id) or bot.get_channel(channel_id)
+            if channel is None:
+                return
+            msg = await channel.fetch_message(message_id)
+            await msg.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f'Error deleting verification message {message_id}: {e}')
+
+    @discord.ui.button(label='Approve', style=discord.ButtonStyle.green)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message('You do not have permission to review applications.', ephemeral=True)
+            return
+
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message('Guild not available.', ephemeral=True)
+            return
+
+        member = guild.get_member(self.applicant_id)
+        if member is None:
+            await interaction.response.send_message('Applicant not found on this server.', ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+        try:
+            if apprentice_role and apprentice_role in member.roles:
+                await member.remove_roles(apprentice_role, reason='Membership application approved')
+            await assign_exclusive_activity_role(member, CASUAL_ROLE_ID if CASUAL_ROLE_ID else None)
+            casual_role = guild.get_role(CASUAL_ROLE_ID) if CASUAL_ROLE_ID else None
+            if casual_role and casual_role not in member.roles:
+                await member.add_roles(casual_role, reason='Membership application approved')
+        except Exception as e:
+            await interaction.followup.send(f'Error while approving application: {e}', ephemeral=True)
+            return
+
+        dm_status = 'sent'
+        try:
+            await member.send('Application accepted')
+        except Exception:
+            dm_status = 'failed (DM closed)'
+
+        await self._delete_application_message(guild)
+        await self._delete_verification_message(guild, interaction.channel.id, interaction.message.id)
+        self._clear_active_application()
+
+        await interaction.followup.send(
+            f'Approved application for {member.mention}. Role set to Casual. Applicant DM {dm_status}.',
+            ephemeral=True
+        )
+
+    @discord.ui.button(label='Deny', style=discord.ButtonStyle.red)
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message('You do not have permission to review applications.', ephemeral=True)
+            return
+
+        modal = MembershipDenyReasonModal(
+            review_view=self,
+            verification_channel_id=interaction.channel.id,
+            verification_message_id=interaction.message.id
+        )
+        await interaction.response.send_modal(modal)
+
+
+class MembershipApplicationView(discord.ui.View):
+    def __init__(self, applicant_id: int, application_channel_id: int, application_message_id: int):
+        super().__init__(timeout=None)
+        self.applicant_id = applicant_id
+        self.application_channel_id = application_channel_id
+        self.application_message_id = application_message_id
+        self.verification_channel_id = None
+        self.verification_message_id = None
+
+    def set_verification_message(self, verification_channel_id: int, verification_message_id: int):
+        self.verification_channel_id = verification_channel_id
+        self.verification_message_id = verification_message_id
+
+    async def _delete_message(self, guild: discord.Guild, channel_id: int | None, message_id: int | None):
+        if not channel_id or not message_id:
+            return
+        try:
+            channel = guild.get_channel(channel_id) or bot.get_channel(channel_id)
+            if channel is None:
+                return
+            msg = await channel.fetch_message(message_id)
+            await msg.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f'Error deleting message {message_id} in channel {channel_id}: {e}')
+
+    @discord.ui.button(label='Abort', style=discord.ButtonStyle.red)
+    async def abort(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message('Guild not available.', ephemeral=True)
+            return
+
+        if interaction.user.id != self.applicant_id and not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message('Only the applicant can abort this application.', ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        await self._delete_message(guild, self.application_channel_id, self.application_message_id)
+        await self._delete_message(guild, self.verification_channel_id, self.verification_message_id)
+        ACTIVE_MEMBERSHIP_APPLICATIONS.pop(self.applicant_id, None)
+
+        await interaction.followup.send('Application aborted and removed.', ephemeral=True)
+
+
 def nbsp(text):
     """Replaces all regular spaces with non-breaking spaces."""
     return text.replace(' ', '\u00A0')
@@ -117,11 +339,105 @@ def logo2URL(logo_suffix):
         return LOGO_URL + logo_suffix
     return None
 
+
+# Social link fixer (minimal integration)
+# Credit: inspired by Kyrela/FixTweetBot (https://github.com/Kyrela/FixTweetBot), author Kyrela.
+SOCIAL_FIX_DOMAIN_MAP = {
+    'twitter.com': 'fxtwitter.com',
+    'x.com': 'fxtwitter.com',
+    'reddit.com': 'vxreddit.com',
+    'redditmedia.com': 'vxreddit.com',
+    'instagram.com': 'fxstagram.com',
+    'tiktok.com': 'tnktok.com',
+    'threads.net': 'fixthreads.net',
+    'threads.com': 'fixthreads.net',
+    'bsky.app': 'bskx.app',
+    'youtube.com': 'koutube.com',
+    'youtu.be': 'koutube.com',
+    'twitch.tv': 'fxtwitch.seria.moe',
+    'pixiv.net': 'phixiv.net',
+    'spotify.com': 'fxspotify.com',
+}
+
+URL_REGEX = re.compile(r'https?://[^\s<>()]+', re.IGNORECASE)
+
+
+def _normalize_host(host: str) -> str:
+    if not host:
+        return ''
+    host = host.lower()
+    if host.startswith('www.'):
+        host = host[4:]
+    return host
+
+
+def _replace_social_link(url: str) -> str | None:
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return None
+
+    host = _normalize_host(parts.netloc)
+    if not host:
+        return None
+
+    target = None
+    for source_host, target_host in SOCIAL_FIX_DOMAIN_MAP.items():
+        if host == source_host or host.endswith('.' + source_host):
+            target = target_host
+            break
+
+    if not target:
+        return None
+
+    if host == target or host.endswith('.' + target):
+        return None
+
+    new_url = urlunsplit((parts.scheme, target, parts.path, parts.query, parts.fragment))
+    return new_url
+
+
+def extract_fixed_social_links(content: str):
+    if not content:
+        return []
+
+    fixed_links = []
+    seen = set()
+    for match in URL_REGEX.findall(content):
+        original = match.rstrip('.,!?;:')
+        fixed = _replace_social_link(original)
+        if fixed and fixed not in seen:
+            fixed_links.append((original, fixed))
+            seen.add(fixed)
+
+    return fixed_links
+
+
+def rewrite_social_links_in_text(content: str):
+    if not content:
+        return content, 0
+
+    replacements = 0
+
+    def _replacer(match: re.Match):
+        nonlocal replacements
+        raw = match.group(0)
+        stripped = raw.rstrip('.,!?;:')
+        suffix = raw[len(stripped):]
+        fixed = _replace_social_link(stripped)
+        if not fixed:
+            return raw
+        replacements += 1
+        return fixed + suffix
+
+    rewritten = URL_REGEX.sub(_replacer, content)
+    return rewritten, replacements
+
 def format_club_info(result):
     """Formats raw club info tuple into a dictionary.
 
     Args:
-        result: Tuple from database (name, league_name, country, logo, tier, flag, id, color, league_logo, ticket_notes, ticket_url)
+        result: Tuple from database (name, league_name, country, logo, tier, flag, id, color, league_logo, ticket_notes, ticket_price_range, ticket_url)
 
     Returns:
         Dictionary with formatted club information or None
@@ -141,9 +457,27 @@ def format_club_info(result):
     data["league_logo"] = logo2URL(result[8]) if result[8] else ''
     # optional ticketing info (may not exist on older DBs)
     data["ticket_notes"] = result[9] if len(result) > 9 and result[9] else ''
-    data["ticket_url"] = result[10] if len(result) > 10 and result[10] else ''
+    data["ticket_price_range"] = result[10] if len(result) > 10 and result[10] else ''
+    data["ticket_url"] = result[11] if len(result) > 11 and result[11] else ''
     data["no_league"] = not result[1] or not result[2]
     return data
+
+def format_stadium_info(result):
+    """Formats raw stadium info tuple into a dictionary."""
+    if not result:
+        return None
+
+    return {
+        "stadium_id": result[0],
+        "name": result[1] if len(result) > 1 and result[1] else '',
+        "image_url": result[2] if len(result) > 2 and result[2] else '',
+        "capacity": result[3] if len(result) > 3 and result[3] is not None else None,
+        "built_year": result[4] if len(result) > 4 and result[4] is not None else None,
+        "plan_image_url": result[5] if len(result) > 5 and result[5] else '',
+        "block_description": result[6] if len(result) > 6 and result[6] else '',
+        "how_to_get_there": result[7] if len(result) > 7 and result[7] else '',
+        "notes": result[8] if len(result) > 8 and result[8] else '',
+    }
 
 def embed_for_club(club: dict):
     """Creates a Discord embed for a club."""
@@ -202,6 +536,8 @@ async def _post_member_list(guild):
     # Group members by country, league, and club with league tier information
     clubs = {}  # Cache club info
     no_league_clubs = set()
+    apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+    apprentice_user_ids = set(m.id for m in apprentice_role.members) if apprentice_role else set()
 
     def get_club(club_id):
         if club_id not in clubs:
@@ -213,6 +549,7 @@ async def _post_member_list(guild):
                 no_league_clubs.add(club_id)
             club["members"] = []
             club["experts"] = []
+            club["apprentices"] = []
         return clubs[club_id]
 
     for member in guild.members:
@@ -224,7 +561,10 @@ async def _post_member_list(guild):
             continue  # Skip members without a club
 
         lvl = db.get_user_level(member.id)
-        club["members"].append(nbsp(f'{member.mention} 🥇 {lvl}'))
+        if member.id in apprentice_user_ids:
+            club["apprentices"].append(nbsp(f'{member.mention} {lvl}'))
+        else:
+            club["members"].append(nbsp(f'{member.mention} 🥇 {lvl}'))
 
     expert_data = db.get_all_expert_clubs(guild.id)
     for (user_id, club_id) in expert_data:
@@ -236,7 +576,10 @@ async def _post_member_list(guild):
             continue
 
         lvl = db.get_user_level(user_id)
-        club["experts"].append(nbsp(f'{member_obj.mention} 🥈 {lvl}'))
+        if user_id in apprentice_user_ids:
+            club["apprentices"].append(nbsp(f'{member_obj.mention} {lvl}'))
+        else:
+            club["experts"].append(nbsp(f'{member_obj.mention} 🥈 {lvl}'))
 
     # Send header message
     await channel.send(f"**Server: {guild.name}**\n**Number of members: {guild.member_count}**")
@@ -273,6 +616,9 @@ async def _post_member_list(guild):
         if "experts" in club and len(club["experts"]) > 0:
             embed.add_field(name=f'Experts ({len(club["experts"])})',
                 value=", ".join(club["experts"]), inline=False)
+        if "apprentices" in club and len(club["apprentices"]) > 0:
+            embed.add_field(name=f'Apprentice ({len(club["apprentices"])})',
+                value=", ".join(club["apprentices"]), inline=False)
         embed.set_author(name=f"{club['name']} ({len(club['members'])})")
         embeds.append(embed)
 
@@ -287,16 +633,261 @@ async def _post_member_list(guild):
 async def ping(ctx):
     await ctx.send(f'Yes, {ctx.author.mention}, I\'m here ! :robot: :saluting_face: ({version})')
 
+
+def _is_bot_command_overview_message(message: discord.Message) -> bool:
+    if not message:
+        return False
+    if BOT_COMMAND_OVERVIEW_MARKER in (message.content or ''):
+        return True
+    for embed in message.embeds:
+        footer = getattr(embed, 'footer', None)
+        footer_text = getattr(footer, 'text', None)
+        if footer_text and BOT_COMMAND_OVERVIEW_MARKER in footer_text:
+            return True
+    return False
+
+
+def _build_bot_command_overview_embed(synced_commands):
+    category_order = [
+        'Setup & Profile',
+        'Club Info',
+        'Tags',
+        'Club Management',
+        'Expert Clubs',
+        'Other Commands'
+    ]
+    category_map = {
+        'set-club': 'Setup & Profile',
+        'profile': 'Setup & Profile',
+        'club': 'Club Info',
+        'club-members': 'Club Info',
+        'tags': 'Tags',
+        'add-tag': 'Tags',
+        'update-league': 'Club Management',
+        'set-clubicon': 'Club Management',
+        'set-clubcolor': 'Club Management',
+        'add-ticketinginfo': 'Club Management',
+        'add-stadiuminfo': 'Club Management',
+        'add-expert-club': 'Expert Clubs',
+        'remove-expert-club': 'Expert Clubs',
+    }
+
+    grouped = {name: [] for name in category_order}
+    for command in synced_commands or []:
+        try:
+            if getattr(command, 'type', discord.AppCommandType.chat_input) != discord.AppCommandType.chat_input:
+                continue
+        except Exception:
+            continue
+
+        cmd_name = getattr(command, 'name', None)
+        if not cmd_name:
+            continue
+
+        cmd_description = (getattr(command, 'description', None) or 'No description').strip()
+        cmd_id = getattr(command, 'id', None)
+        cmd_mention = f'</{cmd_name}:{cmd_id}>' if cmd_id else f'/{cmd_name}'
+        category = category_map.get(cmd_name, 'Other Commands')
+        grouped.setdefault(category, []).append((cmd_name.lower(), cmd_mention, cmd_description))
+
+    for entries in grouped.values():
+        entries.sort(key=lambda item: item[0])
+
+    lines = [
+        'Here are all available slash commands, grouped by category:',
+        ''
+    ]
+    for category in category_order:
+        entries = grouped.get(category, [])
+        if not entries:
+            continue
+        lines.append(f'**{category}**')
+        for _, mention, description in entries:
+            lines.append(f'• {mention} — {description}')
+        lines.append('')
+
+    if lines and not lines[-1].strip():
+        lines.pop()
+
+    if len(lines) <= 1:
+        lines = [
+            'Slash commands are currently syncing.',
+            'Please try again in a few seconds.'
+        ]
+
+    embed = discord.Embed(
+        title='Bot Commands',
+        description='\n'.join(lines),
+        color=discord.Color.blurple()
+    )
+    embed.set_footer(text=f'{BOT_COMMAND_OVERVIEW_MARKER} | Auto-delete: 15 minutes (except this message)')
+    return embed
+
+
+async def _delete_message_after_delay(message: discord.Message, delay_seconds: int):
+    try:
+        await asyncio.sleep(delay_seconds)
+        if message.id == BOT_COMMAND_OVERVIEW_MESSAGE_ID or _is_bot_command_overview_message(message):
+            return
+        await message.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f'Error deleting message {getattr(message, "id", "unknown")} after delay: {e}')
+
+
+def _resolve_bot_command_channel(guild: discord.Guild | None):
+    global ACTIVE_BOT_COMMAND_CHANNEL_ID
+
+    channel = None
+    if BOT_COMMAND_CHANNEL_ID:
+        channel = bot.get_channel(BOT_COMMAND_CHANNEL_ID)
+        if channel is None and guild is not None:
+            channel = guild.get_channel(BOT_COMMAND_CHANNEL_ID)
+
+    if channel is None and guild is not None:
+        fallback_names = {'bot-command', 'bot-commands', 'bot_command'}
+        for text_channel in getattr(guild, 'text_channels', []):
+            if getattr(text_channel, 'name', '').lower() in fallback_names:
+                channel = text_channel
+                break
+
+    ACTIVE_BOT_COMMAND_CHANNEL_ID = getattr(channel, 'id', 0) if channel else 0
+    return channel
+
+
+async def ensure_bot_command_overview_message(synced_commands):
+    global BOT_COMMAND_OVERVIEW_MESSAGE_ID
+
+    guild = bot.get_guild(GUILD_ID)
+    channel = _resolve_bot_command_channel(guild)
+    if channel is None:
+        print(f'Bot command channel not found. env BOT_COMMAND_CHANNEL_ID={BOT_COMMAND_CHANNEL_ID}')
+        return
+
+    if BOT_COMMAND_CHANNEL_ID and channel.id == BOT_COMMAND_CHANNEL_ID:
+        print(f'Bot command channel resolved by ID: {channel.id}')
+    else:
+        print(f'Bot command channel resolved by name fallback: {channel.name} ({channel.id})')
+
+    embed = _build_bot_command_overview_embed(synced_commands)
+    overview_message = None
+    messages_to_delete = []
+
+    async for msg in channel.history(limit=200):
+        if _is_bot_command_overview_message(msg):
+            if overview_message is None:
+                overview_message = msg
+            else:
+                messages_to_delete.append(msg)
+            continue
+        messages_to_delete.append(msg)
+
+    if overview_message is None:
+        overview_message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await overview_message.edit(content='', embed=embed)
+
+    BOT_COMMAND_OVERVIEW_MESSAGE_ID = overview_message.id
+
+    try:
+        if not overview_message.pinned:
+            await overview_message.pin(reason='Keep command overview visible')
+    except Exception as e:
+        print(f'Could not pin command overview message: {e}')
+
+    for msg in messages_to_delete:
+        if msg.id == BOT_COMMAND_OVERVIEW_MESSAGE_ID:
+            continue
+        try:
+            await msg.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f'Error deleting old message {msg.id} in bot-command channel: {e}')
+
+
+async def migrate_users_without_club_to_newcomer(guild: discord.Guild):
+    """Ensure legacy users without a club are moved to newcomer role."""
+    newcomer_role = guild.get_role(NEWCOMER_ROLE_ID) if NEWCOMER_ROLE_ID else None
+    apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+
+    if newcomer_role is None:
+        print(f'Newcomer role with ID {NEWCOMER_ROLE_ID} not found. Skipping migration.')
+        return
+
+    migrated_count = 0
+    checked_count = 0
+
+    for member in guild.members:
+        if member.bot:
+            continue
+        checked_count += 1
+
+        try:
+            club_id, _ = db.get_user_profile(guild.id, member.id)
+        except Exception as e:
+            print(f'Error checking profile for {member.id}: {e}')
+            continue
+
+        if club_id:
+            continue
+
+        roles_to_remove = []
+        if apprentice_role and apprentice_role in member.roles:
+            roles_to_remove.append(apprentice_role)
+        for rid in EXCLUSIVE_ACTIVITY_ROLE_IDS:
+            role_obj = guild.get_role(rid)
+            if role_obj and role_obj in member.roles:
+                roles_to_remove.append(role_obj)
+
+        changed = False
+        try:
+            if roles_to_remove:
+                await member.remove_roles(*roles_to_remove, reason='No club set: move member to newcomer')
+                changed = True
+            if newcomer_role not in member.roles:
+                await member.add_roles(newcomer_role, reason='No club set: move member to newcomer')
+                changed = True
+        except Exception as e:
+            print(f'Error migrating member {member.id} to newcomer: {e}')
+            continue
+
+        if changed:
+            migrated_count += 1
+
+    print(f'Newcomer migration completed. Checked={checked_count}, migrated={migrated_count}')
+
 @bot.event
 async def on_ready():
     print(f'{bot.user} is logged in!')
 
     # Sync slash commands
+    synced_commands = []
     try:
-        synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-        print(f'Synced {len(synced)} command(s) to guild {GUILD_ID}')
+        global SET_CLUB_COMMAND_MENTION, ADD_EXPERT_CLUB_COMMAND_MENTION
+        synced_commands = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+        print(f'Synced {len(synced_commands)} command(s) to guild {GUILD_ID}')
+        synced = synced_commands
+        set_club_synced = next((cmd for cmd in synced if cmd.name == 'set-club'), None)
+        if set_club_synced:
+            SET_CLUB_COMMAND_MENTION = f'</{set_club_synced.name}:{set_club_synced.id}>'
+        add_expert_club_synced = next((cmd for cmd in synced if cmd.name == 'add-expert-club'), None)
+        if add_expert_club_synced:
+            ADD_EXPERT_CLUB_COMMAND_MENTION = f'</{add_expert_club_synced.name}:{add_expert_club_synced.id}>'
     except Exception as e:
         print(f'Failed to sync commands: {e}')
+        try:
+            synced_commands = await bot.tree.fetch_commands(guild=discord.Object(id=GUILD_ID))
+            print(f'Fetched {len(synced_commands)} existing guild command(s) after sync failure.')
+        except Exception as fetch_error:
+            print(f'Failed to fetch guild commands: {fetch_error}')
+
+    # Ensure bot-command overview message exists and stays visible
+    try:
+        await ensure_bot_command_overview_message(synced_commands)
+    except Exception as e:
+        print(f'Error ensuring bot-command overview message: {e}')
 
     # Find the server (guild)
     guild = bot.get_guild(GUILD_ID)
@@ -304,6 +895,12 @@ async def on_ready():
     if not guild:
         print(f'Server with ID {GUILD_ID} not found.')
         return
+
+    # Migration: move legacy users without a club to newcomer role
+    try:
+        await migrate_users_without_club_to_newcomer(guild)
+    except Exception as e:
+        print(f'Error during newcomer migration: {e}')
 
     # Post the member list
     await post_member_list(guild)
@@ -334,8 +931,8 @@ async def on_member_join(member):
     # Get or create the role
     role = guild.get_role(NEWCOMER_ROLE_ID)
     if role is None:
-            print(f'Could not create role: {e}')
-            return
+        print(f'Role with ID {NEWCOMER_ROLE_ID} not found in guild {guild.id}')
+        return
 
     # Assign the role to the new member
     try:
@@ -360,14 +957,24 @@ async def on_member_join(member):
 
     # Ask questions in the welcome channel
     if welcome_channel:
+        support_user_mention = f'<@{SUPPORT_USER_ID}>'
         await welcome_channel.send(
-            f"👋 Welcome {member.mention} to **{guild.name}**! "
-            f"Please use the `/set-club` command to set your home club. "
-            "If it does not exist yet, just enter its name "
-            "and it will be created automatically. "
-            "After setting your home club with `/set-club`, you can add additional clubs you're an expert for with the `/add-expert-club` command. "
-            "Please mute the line-up and bot-command channels "
-            "to avoid a notification overload. "
+            f"👋 **Welcome {member.mention} to {guild.name}!**\n\n"
+            "**1) Set your home club (required for full access)**\n"
+            f"Use {SET_CLUB_COMMAND_MENTION} by clicking it in this message or typing it below.\n"
+            "If your club does not exist yet, enter its name anyway, it will be created automatically.\n"
+            f"If needed, contact {support_user_mention} to add your club.\n\n"
+            "**2) Add expert clubs (optional)**\n"
+            f"Use {ADD_EXPERT_CLUB_COMMAND_MENTION} to add clubs you're an expert for.\n\n"
+            "**3) Apprentice status & verification**\n"
+            "After setting your home club, your status changes to **Apprentice**.\n"
+            "To apply for full member status, submit your request in **membership-application**.\n"
+            "Your application will be reviewed by the mods.\n\n"
+            "**4) Where to use slash commands**\n"
+            "Please visit the **bot-command** channel for slash commands.\n\n"
+            "**5) Recommended**\n"
+            "Mute the **line-up** and **bot-command** channels to avoid notification overload."
+            , allowed_mentions=discord.AllowedMentions.none()
             )
 
     else:
@@ -376,15 +983,211 @@ async def on_member_join(member):
 @bot.event
 async def on_message(message):
     """Handle messages in the set-club channel."""
+    if ACTIVE_BOT_COMMAND_CHANNEL_ID and message.channel.id == ACTIVE_BOT_COMMAND_CHANNEL_ID:
+        if message.id != BOT_COMMAND_OVERVIEW_MESSAGE_ID and not _is_bot_command_overview_message(message):
+            asyncio.create_task(_delete_message_after_delay(message, BOT_COMMAND_MESSAGE_TTL_SECONDS))
+
     # Ignore bot messages
     if message.author.bot:
         return
+
+    # Social link fixer: post improved-embed links
+    try:
+        rewritten_content, fix_count = rewrite_social_links_in_text(message.content or '')
+        if fix_count > 0:
+            outgoing_lines = [
+                f'Posted by {message.author.mention}',
+                rewritten_content if rewritten_content.strip() else '(no text)'
+            ]
+
+            if message.attachments:
+                outgoing_lines.append('Attachments:')
+                for attachment in message.attachments:
+                    outgoing_lines.append(attachment.url)
+
+            outgoing_text = '\n'.join(outgoing_lines)
+            if len(outgoing_text) > 1900:
+                outgoing_text = outgoing_text[:1890] + '\n…'
+
+            await message.channel.send(
+                outgoing_text,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+            # Remove original message to avoid duplicate unfixed/fixed links when possible
+            try:
+                can_manage_messages = False
+                if message.guild is not None:
+                    me = message.guild.me or message.guild.get_member(bot.user.id)
+                    if me:
+                        can_manage_messages = message.channel.permissions_for(me).manage_messages
+                if can_manage_messages:
+                    await message.delete()
+                else:
+                    print(
+                        f"SocialFix: missing manage_messages permission in channel={getattr(message.channel, 'id', 'unknown')} "
+                        f"for deleting original message {message.id}"
+                    )
+            except discord.NotFound:
+                pass
+            except Exception as delete_error:
+                print(f'Error deleting original message after social fix: {delete_error}')
+            print(
+                f"SocialFix: user={message.author} ({message.author.id}) channel={getattr(message.channel, 'id', 'unknown')} "
+                f"fixed={fix_count}"
+            )
+    except Exception as e:
+        print(f'Error in social link fixer: {e}')
 
     # Increment activity counter for the user
     try:
         db.increment_activity(message.author.id)
     except Exception as e:
         print(f'Error incrementing activity: {e}')
+
+    # Membership application channel: forward apprentice applications to mod verification channel
+    if message.channel.id == MEMBERSHIP_APPLICATION_CHANNEL_ID:
+        try:
+            def _is_image_attachment(attachment: discord.Attachment) -> bool:
+                content_type = (attachment.content_type or '').lower()
+                if content_type.startswith('image/'):
+                    return True
+                filename = (attachment.filename or '').lower()
+                return filename.endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'))
+
+            async def _build_membership_embeds_and_files(base_embed: discord.Embed, attachments):
+                embeds = [base_embed]
+                files = []
+                non_image_names = []
+                used_filenames = set()
+                image_embed_count = 1  # base embed counts as first embed
+
+                for index, attachment in enumerate(attachments, start=1):
+                    filename = attachment.filename or f'attachment-{index}'
+                    if filename in used_filenames:
+                        stem, dot, suffix = filename.rpartition('.')
+                        stem = stem or filename
+                        counter = 2
+                        while filename in used_filenames:
+                            if dot:
+                                filename = f'{stem}-{counter}.{suffix}'
+                            else:
+                                filename = f'{stem}-{counter}'
+                            counter += 1
+                    used_filenames.add(filename)
+
+                    try:
+                        copied_file = await attachment.to_file(filename=filename, use_cached=True)
+                        files.append(copied_file)
+                    except Exception as copy_error:
+                        print(f'Error copying attachment {attachment.filename}: {copy_error}')
+                        non_image_names.append(f'{filename} (copy failed)')
+                        continue
+
+                    if _is_image_attachment(attachment):
+                        image_url = f'attachment://{filename}'
+                        if base_embed.image.url is None:
+                            base_embed.set_image(url=image_url)
+                        elif image_embed_count < 10:
+                            image_embed = discord.Embed(color=base_embed.color, timestamp=base_embed.timestamp)
+                            image_embed.set_image(url=image_url)
+                            embeds.append(image_embed)
+                            image_embed_count += 1
+                        else:
+                            non_image_names.append(f'{filename} (not shown: max 10 embeds)')
+                    else:
+                        non_image_names.append(filename)
+
+                if non_image_names:
+                    base_embed.add_field(name='Attachments', value='\n'.join(non_image_names), inline=False)
+
+                return embeds, files
+
+            guild = message.guild
+            if guild is None:
+                return
+
+            # Allow only one active application per apprentice
+            existing = ACTIVE_MEMBERSHIP_APPLICATIONS.get(message.author.id)
+            if existing:
+                warning = await message.channel.send('application already in progress. abort current application to send a new one')
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                try:
+                    await warning.delete(delay=10)
+                except Exception:
+                    pass
+                return
+
+            apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+            if apprentice_role is None or apprentice_role not in message.author.roles:
+                await message.reply('Only users with the Apprentice role can apply here.', mention_author=False)
+                return
+
+            has_proof = bool(message.attachments) or bool((message.content or '').strip())
+            if not has_proof:
+                await message.reply('Please attach a screenshot or provide another proof of your groundhopping activities.', mention_author=False)
+                return
+
+            mod_channel = bot.get_channel(MOD_VERFICATION_CHANNEL_ID)
+            if not mod_channel:
+                print(f'Mod verification channel with ID {MOD_VERFICATION_CHANNEL_ID} not found.')
+                return
+
+            # Repost application by bot in membership channel with status pending
+            app_embed = discord.Embed(title='Membership Application', color=discord.Color.orange(), timestamp=message.created_at)
+            app_embed.add_field(name='Status', value='pending', inline=False)
+            app_embed.add_field(name='Applicant', value=f'{message.author.mention} ({message.author.id})', inline=False)
+            app_embed.add_field(name='Text', value=message.content if message.content else '(no text)', inline=False)
+            app_embeds, app_files = await _build_membership_embeds_and_files(app_embed, message.attachments)
+
+            app_view = MembershipApplicationView(
+                applicant_id=message.author.id,
+                application_channel_id=message.channel.id,
+                application_message_id=0
+            )
+            reposted = await message.channel.send(
+                embeds=app_embeds,
+                files=app_files,
+                view=app_view,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+            app_view.application_message_id = reposted.id
+
+            # Forward reposted application to mod verification
+            mod_embed = discord.Embed(title='Membership Application', color=discord.Color.gold(), timestamp=message.created_at)
+            mod_embed.add_field(name='Applicant', value=f'{message.author.mention} ({message.author.id})', inline=False)
+            mod_embed.add_field(name='Application Message', value=f'[Jump to message]({reposted.jump_url})', inline=False)
+            mod_embed.add_field(name='Text', value=message.content if message.content else '(no text)', inline=False)
+            mod_embeds, mod_files = await _build_membership_embeds_and_files(mod_embed, message.attachments)
+
+            review_view = MembershipReviewView(
+                applicant_id=message.author.id,
+                application_channel_id=message.channel.id,
+                application_message_id=reposted.id
+            )
+            verification_msg = await mod_channel.send(
+                embeds=mod_embeds,
+                files=mod_files,
+                view=review_view,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+
+            app_view.set_verification_message(mod_channel.id, verification_msg.id)
+            ACTIVE_MEMBERSHIP_APPLICATIONS[message.author.id] = {
+                'application_channel_id': message.channel.id,
+                'application_message_id': reposted.id,
+                'verification_channel_id': mod_channel.id,
+                'verification_message_id': verification_msg.id,
+            }
+
+            try:
+                await message.delete()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f'Error forwarding membership application: {e}')
 
     # Groundhelp channel: detect $ClubName and notify matching members
     if message.channel.id == GROUNDHELP_CHANNEL_ID:
@@ -655,7 +1458,7 @@ async def on_message(message):
                     try:
                         # preview embed: include message content (without $ tokens) and a compact list of profiles
                         # Embed title: show combined club name(s) (no 'Vorschau:' prefix)
-                        preview_title = combined_club_name if combined_club_name else 'Groundhelp Anfrage'
+                        preview_title = combined_club_name if combined_club_name else 'Groundhelp Request'
                         preview = discord.Embed(title=preview_title, description=desc, color=club_color)
                         if club_logo_url:
                             try:
@@ -691,7 +1494,7 @@ async def on_message(message):
                                         print(f'Could not create thread after immediate send: {e}')
                             except Exception as e:
                                 print(f'Error sending immediate groundhelp mentions: {e}')
-                                await message.channel.send('Fehler beim direkten Senden der Groundhelp-Nachricht.')
+                                await message.channel.send('Error sending the Groundhelp message directly.')
                         else:
                             view = ConfirmPingView(author=message.author, channel=message.channel, mentions=limited, public_embed=embed, allowed_mentions=allowed, matched_query=matched_query)
 
@@ -744,6 +1547,15 @@ async def assign_exclusive_activity_role(member: discord.Member, role_id: int | 
     if not EXCLUSIVE_ACTIVITY_ROLE_IDS:
         return
     guild = member.guild
+    # Protect newcomers and apprentices from activity-role changes
+    try:
+        newcomer_role = guild.get_role(NEWCOMER_ROLE_ID) if NEWCOMER_ROLE_ID else None
+        apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+        if (newcomer_role and newcomer_role in member.roles) or (apprentice_role and apprentice_role in member.roles):
+            return
+    except Exception:
+        # defensive: if role checks fail, fall through to normal behavior
+        pass
     try:
         roles_to_remove = []
         for rid in EXCLUSIVE_ACTIVITY_ROLE_IDS:
@@ -765,6 +1577,15 @@ async def assign_exclusive_activity_role(member: discord.Member, role_id: int | 
 async def update_activity_role(member: discord.Member):
     if member.bot:
         return
+    # If the member is a newcomer or apprentice, do not change activity roles
+    try:
+        guild = member.guild
+        newcomer_role = guild.get_role(NEWCOMER_ROLE_ID) if NEWCOMER_ROLE_ID else None
+        apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+        if (newcomer_role and newcomer_role in member.roles) or (apprentice_role and apprentice_role in member.roles):
+            return
+    except Exception:
+        pass
     try:
         lvl = db.get_user_level(member.id)
     except Exception as e:
@@ -791,10 +1612,16 @@ async def sync_activity_roles(guild: discord.Guild):
     """Iterate all members and sync their activity-based role once."""
     print('Syncing activity roles for all members...')
     try:
+        # Pre-fetch special roles to skip members who should not be adjusted
+        newcomer_role = guild.get_role(NEWCOMER_ROLE_ID) if NEWCOMER_ROLE_ID else None
+        apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
         for member in guild.members:
             if member.bot:
                 continue
+            # Skip newcomers and apprentices — they keep their special roles until manually changed
             try:
+                if (newcomer_role and newcomer_role in member.roles) or (apprentice_role and apprentice_role in member.roles):
+                    continue
                 await update_activity_role(member)
                 await asyncio.sleep(0.15)
             except Exception as e:
@@ -939,14 +1766,28 @@ async def set_club_command(
 
     # Remove user from newcomer role if they have it
     role = guild.get_role(NEWCOMER_ROLE_ID)
-    groundhopper_role = guild.get_role(GROUNDHOPPER_ROLE_ID)
+    apprentice_role = guild.get_role(APPRENTICE_ROLE_ID)
+
+    # Remove newcomer role if present
     if role in member.roles:
         try:
             await member.remove_roles(role, reason='User set club, removing newcomer role')
             print(f'Removed newcomer role from {member}')
-            await member.add_roles(groundhopper_role, reason='User set club, removing newcomer role')
         except Exception as e:
             print(f'Error removing newcomer role from {member}: {e}')
+
+    # Previously auto-assigned mapped groundhopper/fan role here.
+    # We now intentionally skip auto-assigning the fan/groundhopper role
+    # and only assign the `APPRENTICE` role above.
+
+    # Assign apprentice role to users who set their club
+    if apprentice_role:
+        try:
+            if apprentice_role not in member.roles:
+                await member.add_roles(apprentice_role, reason='User set club, assign apprentice')
+                print(f'Assigned apprentice role to {member}')
+        except Exception as e:
+            print(f'Error assigning apprentice role to {member}: {e}')
 
     await post_member_list(guild)
 
@@ -1111,6 +1952,82 @@ async def club_command(interaction: discord.Interaction,
     
     await show_club_info(interaction, club)
 
+
+# Slash command: /club-members
+@bot.tree.command(name="club-members", description="Show only club members, experts and apprentices", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(club="The club name to display")
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
+async def club_members_command(interaction: discord.Interaction,
+    country: str,
+    club: str):
+    """Shows only member-related club information."""
+    await interaction.response.defer()
+
+    await show_club_members(interaction, club)
+
+
+async def show_club_members(interaction: discord.Interaction, club: str):
+    info = format_club_info(db.get_club_info(db.get_club_id_by_name(club)))
+
+    if not info:
+        await interaction.followup.send(f"❌ Club '{club}' not found in database.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    if guild is None:
+        await interaction.followup.send('❌ Guild not available.', ephemeral=True)
+        return
+
+    members_data = db.get_members_by_club_id(guild.id, info['club_id'])
+    member_ids = set(user_id for (user_id,) in members_data)
+    apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+    apprentice_user_ids = set(m.id for m in apprentice_role.members) if apprentice_role else set()
+
+    member_mentions = []
+    apprentice_mentions = []
+    for (user_id,) in members_data:
+        member = guild.get_member(user_id)
+        if member:
+            level = db.get_user_level(user_id)
+            if user_id in apprentice_user_ids:
+                apprentice_mentions.append(f"{member.mention} {level}")
+            else:
+                member_mentions.append(f"{member.mention} {level}")
+
+    embed = embed_for_club(info)
+    embed.title = f"⚽ {info['name']}"
+    embed.description = f"**League:** {info['league']} (Tier {info['tier']})\n**Country:** {info['country']} {info['flag']}"
+    embed.add_field(
+        name=f"Members ({len(member_mentions)})",
+        value=", ".join(member_mentions) if member_mentions else "No members yet",
+        inline=False
+    )
+
+    expert_user_ids = set(db.get_expert_users_for_club(guild.id, info['club_id'])) - member_ids
+    expert_mentions = []
+    for uid in expert_user_ids:
+        member = guild.get_member(uid)
+        if member:
+            if uid in apprentice_user_ids:
+                apprentice_mentions.append(member.mention)
+            else:
+                expert_mentions.append(member.mention)
+
+    if len(expert_mentions) > 0:
+        embed.add_field(
+            name=f"Experts ({len(expert_mentions)})",
+            value=", ".join(expert_mentions),
+            inline=False
+        )
+    if len(apprentice_mentions) > 0:
+        embed.add_field(
+            name=f"Apprentice ({len(apprentice_mentions)})",
+            value=", ".join(apprentice_mentions),
+            inline=False
+        )
+
+    await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
 async def show_club_info(interaction: discord.Interaction, club: str):
     # Get club information
     info = format_club_info(db.get_club_info(db.get_club_id_by_name(club)))
@@ -1124,14 +2041,20 @@ async def show_club_info(interaction: discord.Interaction, club: str):
     guild = interaction.guild
     members_data = db.get_members_by_club_id(guild.id, info['club_id'])
     member_ids = set(user_id for (user_id,) in members_data)
+    apprentice_role = guild.get_role(APPRENTICE_ROLE_ID) if APPRENTICE_ROLE_ID else None
+    apprentice_user_ids = set(m.id for m in apprentice_role.members) if apprentice_role else set()
 
     # Build member list with levels
     member_mentions = []
+    apprentice_mentions = []
     for (user_id,) in members_data:
         member = guild.get_member(user_id)
         if member:
             level = db.get_user_level(user_id)
-            member_mentions.append(f"{member.mention} {level}")
+            if user_id in apprentice_user_ids:
+                apprentice_mentions.append(f"{member.mention} {level}")
+            else:
+                member_mentions.append(f"{member.mention} {level}")
     
     # Create embed
     embed = embed_for_club(info)
@@ -1150,39 +2073,231 @@ async def show_club_info(interaction: discord.Interaction, club: str):
     for uid in expert_user_ids:
         m = guild.get_member(uid)
         if m:
-            expert_mentions.append(m.mention)
+            if uid in apprentice_user_ids:
+                apprentice_mentions.append(m.mention)
+            else:
+                expert_mentions.append(m.mention)
     if len(expert_mentions) > 0:
         embed.add_field(
             name=f"Experts ({len(expert_mentions)})",
             value=", ".join(expert_mentions),
             inline=False
         )
-    # Add ticketing info as a single grouped field (notes then link)
+    if len(apprentice_mentions) > 0:
+        embed.add_field(
+            name=f"Apprentice ({len(apprentice_mentions)})",
+            value=", ".join(apprentice_mentions),
+            inline=False
+        )
+    # Add ticketing info as a single grouped field
     
     ticket_notes = info.get('ticket_notes', '')
+    ticket_price_range = info.get('ticket_price_range', '')
     ticket_url = info.get('ticket_url', '')
-    if ticket_notes or ticket_url:
+    if ticket_notes or ticket_price_range or ticket_url:
         parts = []
+        if ticket_price_range:
+            parts.append(f'Price Range: {ticket_price_range}')
         if ticket_notes:
             parts.append(str(ticket_notes))
         if ticket_url:
             parts.append(f"[Official Ticketing Website]({ticket_url})")
         embed.add_field(name='Ticketing Info', value='\n'.join(parts), inline=False)
 
+    embeds = [embed]
 
-    await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    stadium = format_stadium_info(db.get_stadium_info_for_club(info['club_id']))
+    if stadium:
+        stadium_embed = discord.Embed(
+            title='🏟️ Stadium',
+            color=info['color']
+        )
+        stadium_embed.add_field(
+            name='Name',
+            value=stadium['name'] if stadium['name'] else 'Unknown',
+            inline=False
+        )
+        stadium_embed.add_field(
+            name='Capacity',
+            value=f"{stadium['capacity']:,}" if isinstance(stadium['capacity'], int) else 'Unknown',
+            inline=True
+        )
+        stadium_embed.add_field(
+            name='Built Year',
+            value=str(stadium['built_year']) if stadium['built_year'] is not None else 'Unknown',
+            inline=True
+        )
+        if stadium['image_url']:
+            stadium_embed.set_image(url=stadium['image_url'])
+        embeds.append(stadium_embed)
 
-# Slash command: /add-ticketinginfo -> open a Modal to add ticket URL and notes
+        stadium_plan_embed = discord.Embed(
+            title='🗺️ Stadium Plan',
+            color=info['color']
+        )
+        stadium_plan_embed.add_field(
+            name='Block Description',
+            value=stadium['block_description'] if stadium['block_description'] else 'No block description provided.',
+            inline=False
+        )
+        stadium_plan_embed.add_field(
+            name='How To Get There',
+            value=stadium['how_to_get_there'] if stadium['how_to_get_there'] else 'No transport information provided.',
+            inline=False
+        )
+        stadium_plan_embed.add_field(
+            name='Notes',
+            value=stadium['notes'] if stadium['notes'] else 'No notes provided.',
+            inline=False
+        )
+        if stadium['plan_image_url']:
+            stadium_plan_embed.set_image(url=stadium['plan_image_url'])
+        embeds.append(stadium_plan_embed)
+
+    await interaction.followup.send(embeds=embeds, allowed_mentions=discord.AllowedMentions.none())
+
+# Slash command: /add-ticketinginfo -> open a Modal to add ticket URL, price range and notes
 @bot.tree.command(name="add-ticketinginfo", description="Add or update ticketing info for a club", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(country="The country of the club", club="The club to update")
 @app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
 async def add_ticketinginfo_command(interaction: discord.Interaction, country: str, club: str):
-    """Opens a modal to set ticketing notes and URL for a club."""
-    # Attempt to open a modal directly
+    """Opens a modal to set ticketing notes, price range and URL for a club."""
     club_id = db.get_club_id_by_name(club)
     if not club_id:
         await interaction.response.send_message(f"❌ Club '{club}' not found.", ephemeral=True)
         return
+
+    field_labels = {
+        'ticket_notes': 'Ticket Notes',
+        'ticket_price_range': 'Ticket Price Range',
+        'ticket_url': 'Ticket URL',
+    }
+
+    def _display_value(value):
+        if value in (None, ''):
+            return '—'
+        return str(value)
+
+    def _get_current_ticket_data(target_club_id: int):
+        club_info = db.get_club_info(target_club_id)
+        notes = club_info[9] if club_info and len(club_info) > 9 else None
+        price_range = club_info[10] if club_info and len(club_info) > 10 else None
+        url = club_info[11] if club_info and len(club_info) > 11 else None
+        return {
+            'ticket_notes': notes,
+            'ticket_price_range': price_range,
+            'ticket_url': url,
+        }
+
+    def _apply_ticket_update(target_club_id: int, current_data: dict, proposed_data: dict, fields_to_apply: list[str]):
+        ticket_notes = current_data.get('ticket_notes')
+        ticket_price_range = current_data.get('ticket_price_range')
+        ticket_url = current_data.get('ticket_url')
+
+        if 'ticket_notes' in fields_to_apply:
+            ticket_notes = proposed_data.get('ticket_notes')
+        if 'ticket_price_range' in fields_to_apply:
+            ticket_price_range = proposed_data.get('ticket_price_range')
+        if 'ticket_url' in fields_to_apply:
+            ticket_url = proposed_data.get('ticket_url')
+
+        db.update_club_ticket_info(target_club_id, ticket_notes, ticket_price_range, ticket_url)
+
+    class TicketFieldReviewView(discord.ui.View):
+        def __init__(
+            self,
+            author_id: int,
+            club_name: str,
+            club_id: int,
+            current_data: dict,
+            proposed_data: dict,
+            changed_fields: list[str],
+            auto_apply_fields: list[str],
+        ):
+            super().__init__(timeout=600)
+            self.author_id = author_id
+            self.club_name = club_name
+            self.club_id = club_id
+            self.current_data = current_data
+            self.proposed_data = proposed_data
+            self.changed_fields = changed_fields
+            self.auto_apply_fields = auto_apply_fields
+            self.index = 0
+            self.confirmed_fields = []
+            self.discarded_fields = []
+
+        def build_embed(self):
+            field_key = self.changed_fields[self.index]
+            old_value = self.current_data.get(field_key)
+            new_value = self.proposed_data.get(field_key)
+
+            embed = discord.Embed(
+                title=f'Ticketing Update Review — {self.club_name}',
+                color=discord.Color.orange()
+            )
+            embed.description = (
+                f'Field {self.index + 1}/{len(self.changed_fields)}\n'
+                f'Choose **Confirm** to overwrite existing information with the new value or **Discard** to keep the current value.'
+            )
+            embed.add_field(name='Field', value=field_labels.get(field_key, field_key), inline=False)
+            embed.add_field(name='Current', value=_display_value(old_value), inline=False)
+            embed.add_field(name='New', value=_display_value(new_value), inline=False)
+            return embed
+
+        async def _finish(self, interaction_obj: discord.Interaction):
+            fields_to_apply = list(self.auto_apply_fields) + list(self.confirmed_fields)
+            try:
+                _apply_ticket_update(self.club_id, self.current_data, self.proposed_data, fields_to_apply)
+            except Exception as e:
+                print(f'Error applying reviewed ticket updates: {e}')
+                await interaction_obj.response.send_message('Error saving ticket information after review.', ephemeral=True)
+                return
+
+            for child in self.children:
+                child.disabled = True
+            try:
+                await interaction_obj.message.edit(view=self)
+            except Exception:
+                pass
+
+            changed_text = ', '.join(field_labels.get(f, f) for f in self.confirmed_fields) if self.confirmed_fields else 'none'
+            kept_text = ', '.join(field_labels.get(f, f) for f in self.discarded_fields) if self.discarded_fields else 'none'
+            auto_text = ', '.join(field_labels.get(f, f) for f in self.auto_apply_fields) if self.auto_apply_fields else 'none'
+            await interaction_obj.response.send_message(
+                f'✅ Review finished for {self.club_name}.\nApplied (after confirm): {changed_text}\nApplied (new fields without confirm): {auto_text}\nKept existing: {kept_text}',
+                ephemeral=True
+            )
+
+            try:
+                await show_club_info(interaction_obj, self.club_name)
+            except Exception:
+                pass
+
+        async def _handle_decision(self, button_interaction: discord.Interaction, confirm: bool):
+            if button_interaction.user.id != self.author_id:
+                await button_interaction.response.send_message('Only the original author can confirm or discard these changes.', ephemeral=True)
+                return
+
+            field_key = self.changed_fields[self.index]
+            if confirm:
+                self.confirmed_fields.append(field_key)
+            else:
+                self.discarded_fields.append(field_key)
+
+            self.index += 1
+            if self.index >= len(self.changed_fields):
+                await self._finish(button_interaction)
+                return
+
+            await button_interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+        @discord.ui.button(label='Confirm', style=discord.ButtonStyle.green)
+        async def confirm_button(self, button_interaction: discord.Interaction, button: discord.ui.Button):
+            await self._handle_decision(button_interaction, confirm=True)
+
+        @discord.ui.button(label='Discard', style=discord.ButtonStyle.grey)
+        async def discard_button(self, button_interaction: discord.Interaction, button: discord.ui.Button):
+            await self._handle_decision(button_interaction, confirm=False)
 
     class TicketModal(discord.ui.Modal, title=f"Ticketing for {club}"):
         ticket_url = discord.ui.TextInput(
@@ -1190,6 +2305,13 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
             style=discord.TextStyle.short,
             required=False,
             placeholder="https://example.com/tickets"
+        )
+        ticket_price_range = discord.ui.TextInput(
+            label="Ticket price range",
+            style=discord.TextStyle.short,
+            required=False,
+            max_length=120,
+            placeholder="e.g. 20-40€"
         )
         ticket_notes = discord.ui.TextInput(
             label="Ticket notes",
@@ -1206,25 +2328,486 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
 
         async def on_submit(self, modal_interaction: discord.Interaction):
             url = self.ticket_url.value.strip()
+            price_range = self.ticket_price_range.value.strip()
             notes = self.ticket_notes.value.strip()
-            # Basic URL validation
+
             if url and not re.match(r'^https?://', url):
                 await modal_interaction.response.send_message('Invalid URL (must start with http:// or https://).', ephemeral=True)
                 return
-            try:
-                db.update_club_ticket_info(self.club_id, notes, url)
-            except Exception as e:
-                print(f'Error updating ticket info: {e}')
-                await modal_interaction.response.send_message('Error saving ticket information.', ephemeral=True)
+
+            current_data = _get_current_ticket_data(self.club_id)
+            proposed_data = {
+                'ticket_notes': notes if notes else None,
+                'ticket_price_range': price_range if price_range else None,
+                'ticket_url': url if url else None,
+            }
+
+            changed_fields = []
+            auto_apply_fields = []
+            for field_key, new_value in proposed_data.items():
+                if new_value is None:
+                    continue
+                if new_value != current_data.get(field_key):
+                    if current_data.get(field_key) in (None, ''):
+                        auto_apply_fields.append(field_key)
+                    else:
+                        changed_fields.append(field_key)
+
+            if not changed_fields and not auto_apply_fields:
+                await modal_interaction.response.send_message(
+                    f'ℹ️ No ticketing fields changed for {self.club_name}. Empty fields were ignored and existing values were kept.',
+                    ephemeral=True
+                )
+                try:
+                    await show_club_info(modal_interaction, self.club_name)
+                except Exception:
+                    pass
                 return
-            await modal_interaction.response.send_message(f'✅ Ticket information for {self.club_name} has been saved.', ephemeral=True)
-            # show updated club info
+
+            if not changed_fields and auto_apply_fields:
+                try:
+                    _apply_ticket_update(self.club_id, current_data, proposed_data, auto_apply_fields)
+                except Exception as e:
+                    print(f'Error applying ticket auto fields: {e}')
+                    await modal_interaction.response.send_message('Error saving ticket information.', ephemeral=True)
+                    return
+
+                auto_text = ', '.join(field_labels.get(f, f) for f in auto_apply_fields)
+                await modal_interaction.response.send_message(
+                    f'✅ Ticket information saved for {self.club_name}. New fields applied without confirmation: {auto_text}',
+                    ephemeral=True
+                )
+                try:
+                    await show_club_info(modal_interaction, self.club_name)
+                except Exception:
+                    pass
+                return
+
+            review_view = TicketFieldReviewView(
+                author_id=modal_interaction.user.id,
+                club_name=self.club_name,
+                club_id=self.club_id,
+                current_data=current_data,
+                proposed_data=proposed_data,
+                changed_fields=changed_fields,
+                auto_apply_fields=auto_apply_fields,
+            )
+            await modal_interaction.response.send_message(
+                embed=review_view.build_embed(),
+                view=review_view,
+                ephemeral=True,
+            )
+
+    modal = TicketModal(club, club_id)
+    try:
+        await interaction.response.send_modal(modal)
+    except Exception:
+        await interaction.response.send_message('Could not open modal in this context.', ephemeral=True)
+
+# Slash command: /add-stadiuminfo -> open two modals to add stadium fields
+@bot.tree.command(name="add-stadiuminfo", description="Add or update stadium info for a club", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(country="The country of the club", club="The club to update")
+@app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
+async def add_stadiuminfo_command(interaction: discord.Interaction, country: str, club: str):
+    print(f"StadiumInfo: command invoked by user={interaction.user} ({interaction.user.id}) for club='{club}' country='{country}'")
+    club_id = db.get_club_id_by_name(club)
+    if not club_id:
+        await interaction.response.send_message(f"❌ Club '{club}' not found.", ephemeral=True)
+        return
+
+    existing_stadium = format_stadium_info(db.get_stadium_info_for_club(club_id))
+
+    field_labels = {
+        'name': 'Name',
+        'image_url': 'Stadium Image URL',
+        'capacity': 'Capacity',
+        'built_year': 'Built Year',
+        'plan_image_url': 'Stadium Plan Image URL',
+        'block_description': 'Block Description',
+        'how_to_get_there': 'How To Get There',
+        'notes': 'Notes',
+    }
+
+    def _display_value(value):
+        if value in (None, ''):
+            return '—'
+        return str(value)
+
+    class StadiumFieldReviewView(discord.ui.View):
+        def __init__(
+            self,
+            author_id: int,
+            club_name: str,
+            club_id: int,
+            stadium_id: int,
+            current_data: dict,
+            proposed_data: dict,
+            changed_fields: list[str],
+            auto_apply_fields: list[str],
+            actor_id: int,
+            actor_name: str,
+        ):
+            super().__init__(timeout=600)
+            self.author_id = author_id
+            self.club_name = club_name
+            self.club_id = club_id
+            self.stadium_id = stadium_id
+            self.current_data = current_data
+            self.proposed_data = proposed_data
+            self.changed_fields = changed_fields
+            self.auto_apply_fields = auto_apply_fields
+            self.actor_id = actor_id
+            self.actor_name = actor_name
+            self.index = 0
+            self.confirmed_fields = []
+            self.discarded_fields = []
+
+        def build_embed(self):
+            field_key = self.changed_fields[self.index]
+            old_value = self.current_data.get(field_key)
+            new_value = self.proposed_data.get(field_key)
+
+            embed = discord.Embed(
+                title=f'Stadium Update Review — {self.club_name}',
+                color=discord.Color.orange()
+            )
+            embed.description = (
+                f'Field {self.index + 1}/{len(self.changed_fields)}\n'
+                f'Choose **Confirm** to overwrite existing information with the new value or **Discard** to keep the current value.'
+            )
+            embed.add_field(name='Field', value=field_labels.get(field_key, field_key), inline=False)
+            embed.add_field(name='Current', value=_display_value(old_value), inline=False)
+            embed.add_field(name='New', value=_display_value(new_value), inline=False)
+            return embed
+
+        async def _finish(self, interaction_obj: discord.Interaction):
+            update_kwargs = {}
+            for field_key in self.auto_apply_fields:
+                update_kwargs[field_key] = self.proposed_data.get(field_key)
+            for field_key in self.confirmed_fields:
+                update_kwargs[field_key] = self.proposed_data.get(field_key)
+
             try:
-                await show_club_info(modal_interaction, self.club_name)
+                if update_kwargs:
+                    db.update_stadium_info_partial(self.stadium_id, **update_kwargs)
+                db.link_club_to_stadium(self.club_id, self.stadium_id)
+            except Exception as e:
+                print(f'Error applying reviewed stadium updates: {e}')
+                await interaction_obj.response.send_message('Error saving stadium information after review.', ephemeral=True)
+                return
+
+            for child in self.children:
+                child.disabled = True
+            try:
+                await interaction_obj.message.edit(view=self)
             except Exception:
                 pass
 
-    modal = TicketModal(club, club_id)
+            changed_text = ', '.join(field_labels.get(f, f) for f in self.confirmed_fields) if self.confirmed_fields else 'none'
+            kept_text = ', '.join(field_labels.get(f, f) for f in self.discarded_fields) if self.discarded_fields else 'none'
+            auto_text = ', '.join(field_labels.get(f, f) for f in self.auto_apply_fields) if self.auto_apply_fields else 'none'
+            print(
+                f"StadiumInfo: review finished by user={self.actor_name} ({self.actor_id}) club='{self.club_name}' "
+                f"stadium_id={self.stadium_id} auto_applied={self.auto_apply_fields} confirmed={self.confirmed_fields} discarded={self.discarded_fields}"
+            )
+            await interaction_obj.response.send_message(
+                f'✅ Review finished for {self.club_name}.\nApplied (after confirm): {changed_text}\nApplied (new fields without confirm): {auto_text}\nKept existing: {kept_text}',
+                ephemeral=True
+            )
+
+            try:
+                await show_club_info(interaction_obj, self.club_name)
+            except Exception:
+                pass
+
+        async def _handle_decision(self, button_interaction: discord.Interaction, confirm: bool):
+            if button_interaction.user.id != self.author_id:
+                await button_interaction.response.send_message('Only the original author can confirm or discard these changes.', ephemeral=True)
+                return
+
+            field_key = self.changed_fields[self.index]
+            if confirm:
+                self.confirmed_fields.append(field_key)
+            else:
+                self.discarded_fields.append(field_key)
+
+            self.index += 1
+            if self.index >= len(self.changed_fields):
+                await self._finish(button_interaction)
+                return
+
+            await button_interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+        @discord.ui.button(label='Confirm', style=discord.ButtonStyle.green)
+        async def confirm_button(self, button_interaction: discord.Interaction, button: discord.ui.Button):
+            await self._handle_decision(button_interaction, confirm=True)
+
+        @discord.ui.button(label='Discard', style=discord.ButtonStyle.grey)
+        async def discard_button(self, button_interaction: discord.Interaction, button: discord.ui.Button):
+            await self._handle_decision(button_interaction, confirm=False)
+
+    class StadiumInfoStepTwoLauncherView(discord.ui.View):
+        def __init__(self, author_id: int, next_modal: discord.ui.Modal):
+            super().__init__(timeout=300)
+            self.author_id = author_id
+            self.next_modal = next_modal
+
+        @discord.ui.button(label='Continue to Step 2', style=discord.ButtonStyle.blurple)
+        async def open_step_two(self, button_interaction: discord.Interaction, button: discord.ui.Button):
+            if button_interaction.user.id != self.author_id:
+                await button_interaction.response.send_message('Only the original author can continue this stadium update.', ephemeral=True)
+                return
+
+            button.disabled = True
+            try:
+                await button_interaction.response.send_modal(self.next_modal)
+            except Exception as e:
+                print(f'Error opening stadium step-2 modal: {e}')
+                await button_interaction.response.send_message('Could not open step 2 modal. Please run /add-stadiuminfo again.', ephemeral=True)
+                return
+
+            try:
+                await button_interaction.message.edit(view=self)
+            except Exception:
+                pass
+
+    class StadiumInfoStepTwoModal(discord.ui.Modal, title=f"Stadium Plan for {club}"):
+        plan_image_url = discord.ui.TextInput(
+            label="Stadium plan image URL",
+            style=discord.TextStyle.short,
+            required=False,
+            placeholder="https://example.com/stadium-plan.jpg"
+        )
+        block_description = discord.ui.TextInput(
+            label="Block description",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=1000,
+            placeholder="Describe blocks / sectors and where they are located."
+        )
+        how_to_get_there = discord.ui.TextInput(
+            label="How to get there",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=1000,
+            placeholder="Transport and access information."
+        )
+        notes = discord.ui.TextInput(
+            label="Notes",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=1000,
+            placeholder="Additional stadium notes."
+        )
+
+        def __init__(self, club_name, club_id, stadium_id, first_data):
+            super().__init__()
+            self.club_name = club_name
+            self.club_id = club_id
+            self.stadium_id = stadium_id
+            self.first_data = first_data
+
+        async def on_submit(self, modal_interaction: discord.Interaction):
+            plan_url = self.plan_image_url.value.strip()
+            block_desc = self.block_description.value.strip()
+            route_info = self.how_to_get_there.value.strip()
+            notes = self.notes.value.strip()
+
+            if plan_url and not re.match(r'^https?://', plan_url):
+                await modal_interaction.response.send_message('Invalid stadium plan URL (must start with http:// or https://).', ephemeral=True)
+                return
+
+            current_data = format_stadium_info(db.get_stadium_info(self.stadium_id))
+            if not current_data:
+                await modal_interaction.response.send_message('Could not load current stadium data for review.', ephemeral=True)
+                return
+
+            proposed_data = {
+                'name': self.first_data.get('name'),
+                'image_url': self.first_data.get('image_url'),
+                'capacity': self.first_data.get('capacity'),
+                'built_year': self.first_data.get('built_year'),
+                'plan_image_url': plan_url if plan_url else None,
+                'block_description': block_desc if block_desc else None,
+                'how_to_get_there': route_info if route_info else None,
+                'notes': notes if notes else None,
+            }
+
+            changed_fields = []
+            auto_apply_fields = []
+            for field_key, new_value in proposed_data.items():
+                if new_value is None:
+                    continue
+                if new_value != current_data.get(field_key):
+                    if current_data.get(field_key) in (None, ''):
+                        auto_apply_fields.append(field_key)
+                    else:
+                        changed_fields.append(field_key)
+
+            print(
+                f"StadiumInfo: step2 submitted by user={modal_interaction.user} ({modal_interaction.user.id}) "
+                f"club='{self.club_name}' stadium_id={self.stadium_id} review_fields={changed_fields} auto_apply_fields={auto_apply_fields}"
+            )
+
+            if not changed_fields and not auto_apply_fields:
+                try:
+                    db.link_club_to_stadium(self.club_id, self.stadium_id)
+                except Exception as e:
+                    print(f'Error linking club to stadium without field changes: {e}')
+                    await modal_interaction.response.send_message('No fields changed, and linking failed.', ephemeral=True)
+                    return
+
+                await modal_interaction.response.send_message(
+                    f'ℹ️ No stadium fields changed for {self.club_name}. Empty fields were ignored and existing values were kept.',
+                    ephemeral=True
+                )
+                try:
+                    await show_club_info(modal_interaction, self.club_name)
+                except Exception:
+                    pass
+                return
+
+            if not changed_fields and auto_apply_fields:
+                update_kwargs = {field_key: proposed_data.get(field_key) for field_key in auto_apply_fields}
+                try:
+                    db.update_stadium_info_partial(self.stadium_id, **update_kwargs)
+                    db.link_club_to_stadium(self.club_id, self.stadium_id)
+                except Exception as e:
+                    print(f'Error applying stadium auto fields: {e}')
+                    await modal_interaction.response.send_message('Error saving stadium information.', ephemeral=True)
+                    return
+
+                auto_text = ', '.join(field_labels.get(f, f) for f in auto_apply_fields)
+                print(
+                    f"StadiumInfo: auto-applied by user={modal_interaction.user} ({modal_interaction.user.id}) "
+                    f"club='{self.club_name}' stadium_id={self.stadium_id} fields={auto_apply_fields}"
+                )
+                await modal_interaction.response.send_message(
+                    f'✅ Stadium information saved for {self.club_name}. New fields applied without confirmation: {auto_text}',
+                    ephemeral=True
+                )
+                try:
+                    await show_club_info(modal_interaction, self.club_name)
+                except Exception:
+                    pass
+                return
+
+            review_view = StadiumFieldReviewView(
+                author_id=modal_interaction.user.id,
+                club_name=self.club_name,
+                club_id=self.club_id,
+                stadium_id=self.stadium_id,
+                current_data=current_data,
+                proposed_data=proposed_data,
+                changed_fields=changed_fields,
+                auto_apply_fields=auto_apply_fields,
+                actor_id=modal_interaction.user.id,
+                actor_name=str(modal_interaction.user),
+            )
+            await modal_interaction.response.send_message(
+                embed=review_view.build_embed(),
+                view=review_view,
+                ephemeral=True,
+            )
+
+    class StadiumInfoStepOneModal(discord.ui.Modal, title=f"Stadium for {club}"):
+        name = discord.ui.TextInput(
+            label="Stadium name",
+            style=discord.TextStyle.short,
+            required=False,
+            max_length=200,
+            placeholder="e.g. San Siro"
+        )
+        image_url = discord.ui.TextInput(
+            label="Stadium image URL",
+            style=discord.TextStyle.short,
+            required=False,
+            placeholder="https://example.com/stadium.jpg"
+        )
+        capacity = discord.ui.TextInput(
+            label="Capacity",
+            style=discord.TextStyle.short,
+            required=False,
+            placeholder="e.g. 75817"
+        )
+        built_year = discord.ui.TextInput(
+            label="Built year",
+            style=discord.TextStyle.short,
+            required=False,
+            placeholder="e.g. 1926"
+        )
+
+        def __init__(self, club_name, club_id, existing_stadium):
+            super().__init__()
+            self.club_name = club_name
+            self.club_id = club_id
+            self.existing_stadium = existing_stadium
+
+        async def on_submit(self, modal_interaction: discord.Interaction):
+            stadium_name = self.name.value.strip()
+            image_url = self.image_url.value.strip()
+            capacity_text = self.capacity.value.strip()
+            built_year_text = self.built_year.value.strip()
+
+            if image_url and not re.match(r'^https?://', image_url):
+                await modal_interaction.response.send_message('Invalid stadium image URL (must start with http:// or https://).', ephemeral=True)
+                return
+
+            parsed_capacity = None
+            if capacity_text:
+                if not capacity_text.isdigit() or int(capacity_text) <= 0:
+                    await modal_interaction.response.send_message('Capacity must be a positive integer.', ephemeral=True)
+                    return
+                parsed_capacity = int(capacity_text)
+
+            parsed_built_year = None
+            if built_year_text:
+                if not built_year_text.isdigit():
+                    await modal_interaction.response.send_message('Built year must be a valid year.', ephemeral=True)
+                    return
+                parsed_built_year = int(built_year_text)
+                if parsed_built_year < 1000 or parsed_built_year > 2100:
+                    await modal_interaction.response.send_message('Built year must be between 1000 and 2100.', ephemeral=True)
+                    return
+
+            stadium_id = None
+            if self.existing_stadium and self.existing_stadium.get('stadium_id'):
+                stadium_id = self.existing_stadium['stadium_id']
+            elif stadium_name:
+                try:
+                    stadium_id = db.get_or_create_stadium(stadium_name)
+                except Exception as e:
+                    print(f'Error creating/finding stadium: {e}')
+                    await modal_interaction.response.send_message('Could not create or resolve stadium name.', ephemeral=True)
+                    return
+            else:
+                await modal_interaction.response.send_message('Please enter a stadium name (required for first-time setup).', ephemeral=True)
+                return
+
+            first_data = {
+                'name': stadium_name if stadium_name else None,
+                'image_url': image_url if image_url else None,
+                'capacity': parsed_capacity,
+                'built_year': parsed_built_year,
+            }
+
+            next_modal = StadiumInfoStepTwoModal(
+                club_name=self.club_name,
+                club_id=self.club_id,
+                stadium_id=stadium_id,
+                first_data=first_data,
+            )
+            launcher_view = StadiumInfoStepTwoLauncherView(
+                author_id=modal_interaction.user.id,
+                next_modal=next_modal,
+            )
+            await modal_interaction.response.send_message(
+                'Step 1 saved. Click the button below to continue with step 2 (stadium plan details).',
+                view=launcher_view,
+                ephemeral=True,
+            )
+
+    modal = StadiumInfoStepOneModal(club, club_id, existing_stadium)
     try:
         await interaction.response.send_modal(modal)
     except Exception:
@@ -1272,7 +2855,7 @@ async def set_clubicon_command(
     await show_club_info(interaction, club)
 
 # Slash command: /set-clubcolor
-@bot.tree.command(name="set-clubcolor", description="Set or update a club's color (hex format)", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="set-clubcolor", description="Set or update a club's embed message color (hex format)", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(
     country="The country of the club",
     club="The club to update",
@@ -1314,7 +2897,7 @@ async def set_clubcolor_command(
     await show_club_info(interaction, club)
 
 # Slash command: /add-expert-club
-@bot.tree.command(name="add-expert-club", description="Mark a club as one you are an expert for (max 4)", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="add-expert-club", description="Mark a club as one you are an expert for (max 10)", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(
     country="The country your expert club is from",
     club="The club name"
@@ -1334,7 +2917,7 @@ async def add_expert_club_command(interaction: discord.Interaction, country: str
             await interaction.followup.send(f"ℹ️ You already marked '{club}' as an expert club.", ephemeral=True)
             return
         if reason == 'limit_reached':
-            await interaction.followup.send("❌ You can mark up to 4 expert clubs. Remove one first.", ephemeral=True)
+            await interaction.followup.send("❌ You can mark up to 10 expert clubs. Remove one first.", ephemeral=True)
             return
         if reason == 'home_club':
             await interaction.followup.send("❌ You are implicitly an expert for your home club and cannot add it as an expert club.", ephemeral=True)
