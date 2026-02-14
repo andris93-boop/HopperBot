@@ -16,7 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 ENV_PATH = Path(__file__).resolve().parent / '.env'
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
-version = "1.7.0"
+version = "1.7.1"
 
 # Filled after slash-command sync; falls back to plain command text.
 SET_CLUB_COMMAND_MENTION = '/set-club'
