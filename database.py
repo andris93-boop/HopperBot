@@ -44,6 +44,7 @@ class HopperDatabase:
                 flag TEXT,
                 color TEXT,
                 ticket_notes TEXT,
+                ticket_price_range TEXT,
                 ticket_url TEXT,
                 FOREIGN KEY (league_id) REFERENCES leagues(id),
                 FOREIGN KEY (stadium_id) REFERENCES stadiums(id)
@@ -60,7 +61,8 @@ class HopperDatabase:
                 built_year INTEGER,
                 plan_image_url TEXT,
                 block_description TEXT,
-                how_to_get_there TEXT
+                how_to_get_there TEXT,
+                notes TEXT
             )
         ''')
 
@@ -74,8 +76,16 @@ class HopperDatabase:
         # Add ticketing columns if missing
         if 'ticket_notes' not in columns:
             cursor.execute('ALTER TABLE clubs ADD COLUMN ticket_notes TEXT')
+        if 'ticket_price_range' not in columns:
+            cursor.execute('ALTER TABLE clubs ADD COLUMN ticket_price_range TEXT')
         if 'ticket_url' not in columns:
             cursor.execute('ALTER TABLE clubs ADD COLUMN ticket_url TEXT')
+
+        # Add stadium columns if missing
+        cursor.execute("PRAGMA table_info(stadiums)")
+        stadium_columns = [column[1] for column in cursor.fetchall()]
+        if 'notes' not in stadium_columns:
+            cursor.execute('ALTER TABLE stadiums ADD COLUMN notes TEXT')
 
         # Table for user profiles
         cursor.execute('''
@@ -288,7 +298,7 @@ class HopperDatabase:
             club_id: The club ID to fetch
 
         Returns:
-            Tuple: (name, league_name, country, logo, tier, flag, id, color, league_logo, ticket_notes, ticket_url) or None
+            Tuple: (name, league_name, country, logo, tier, flag, id, color, league_logo, ticket_notes, ticket_price_range, ticket_url) or None
         """
         if not club_id:
             return None
@@ -296,7 +306,7 @@ class HopperDatabase:
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT c.name, l.name, l.country, c.logo, l.tier, l.flag, c.id, c.color, l.logo, c.ticket_notes, c.ticket_url
+            SELECT c.name, l.name, l.country, c.logo, l.tier, l.flag, c.id, c.color, l.logo, c.ticket_notes, c.ticket_price_range, c.ticket_url
             FROM clubs c
             LEFT JOIN leagues l ON c.league_id = l.id
             WHERE c.id = ?
@@ -349,18 +359,22 @@ class HopperDatabase:
         conn.commit()
         conn.close()
 
-    def update_club_ticket_info(self, club_id, ticket_notes, ticket_url):
+    def update_club_ticket_info(self, club_id, ticket_notes, ticket_price_range, ticket_url):
         """Updates ticketing information for a club.
 
         Args:
             club_id: ID of the club to update
             ticket_notes: Short free-text notes about ticket purchase
+            ticket_price_range: Ticket price range text
             ticket_url: URL to the official ticketing website
         """
         conn = sqlite3.connect(self.database_name)
         cursor = conn.cursor()
 
-        cursor.execute('UPDATE clubs SET ticket_notes = ?, ticket_url = ? WHERE id = ?', (ticket_notes, ticket_url, club_id))
+        cursor.execute(
+            'UPDATE clubs SET ticket_notes = ?, ticket_price_range = ?, ticket_url = ? WHERE id = ?',
+            (ticket_notes, ticket_price_range, ticket_url, club_id)
+        )
         conn.commit()
         conn.close()
 
@@ -405,7 +419,7 @@ class HopperDatabase:
         conn = sqlite3.connect(self.database_name)
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT id, name, image_url, capacity, built_year, plan_image_url, block_description, how_to_get_there
+            SELECT id, name, image_url, capacity, built_year, plan_image_url, block_description, how_to_get_there, notes
             FROM stadiums
             WHERE id = ?
         ''', (stadium_id,))
@@ -421,7 +435,7 @@ class HopperDatabase:
         conn = sqlite3.connect(self.database_name)
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT s.id, s.name, s.image_url, s.capacity, s.built_year, s.plan_image_url, s.block_description, s.how_to_get_there
+            SELECT s.id, s.name, s.image_url, s.capacity, s.built_year, s.plan_image_url, s.block_description, s.how_to_get_there, s.notes
             FROM clubs c
             LEFT JOIN stadiums s ON c.stadium_id = s.id
             WHERE c.id = ?
@@ -443,6 +457,7 @@ class HopperDatabase:
         plan_image_url=None,
         block_description=None,
         how_to_get_there=None,
+        notes=None,
     ):
         """Partially updates stadium fields.
 
@@ -462,7 +477,7 @@ class HopperDatabase:
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT name, image_url, capacity, built_year, plan_image_url, block_description, how_to_get_there
+            SELECT name, image_url, capacity, built_year, plan_image_url, block_description, how_to_get_there, notes
             FROM stadiums
             WHERE id = ?
         ''', (stadium_id,))
@@ -485,6 +500,7 @@ class HopperDatabase:
             'plan_image_url': current[4],
             'block_description': current[5],
             'how_to_get_there': current[6],
+            'notes': current[7],
         }
 
         incoming_map = {
@@ -495,6 +511,7 @@ class HopperDatabase:
             'plan_image_url': plan_image_url,
             'block_description': block_description,
             'how_to_get_there': how_to_get_there,
+            'notes': notes,
         }
 
         set_clauses = []

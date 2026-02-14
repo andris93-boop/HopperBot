@@ -437,7 +437,7 @@ def format_club_info(result):
     """Formats raw club info tuple into a dictionary.
 
     Args:
-        result: Tuple from database (name, league_name, country, logo, tier, flag, id, color, league_logo, ticket_notes, ticket_url)
+        result: Tuple from database (name, league_name, country, logo, tier, flag, id, color, league_logo, ticket_notes, ticket_price_range, ticket_url)
 
     Returns:
         Dictionary with formatted club information or None
@@ -457,7 +457,8 @@ def format_club_info(result):
     data["league_logo"] = logo2URL(result[8]) if result[8] else ''
     # optional ticketing info (may not exist on older DBs)
     data["ticket_notes"] = result[9] if len(result) > 9 and result[9] else ''
-    data["ticket_url"] = result[10] if len(result) > 10 and result[10] else ''
+    data["ticket_price_range"] = result[10] if len(result) > 10 and result[10] else ''
+    data["ticket_url"] = result[11] if len(result) > 11 and result[11] else ''
     data["no_league"] = not result[1] or not result[2]
     return data
 
@@ -475,6 +476,7 @@ def format_stadium_info(result):
         "plan_image_url": result[5] if len(result) > 5 and result[5] else '',
         "block_description": result[6] if len(result) > 6 and result[6] else '',
         "how_to_get_there": result[7] if len(result) > 7 and result[7] else '',
+        "notes": result[8] if len(result) > 8 and result[8] else '',
     }
 
 def embed_for_club(club: dict):
@@ -2010,12 +2012,15 @@ async def show_club_info(interaction: discord.Interaction, club: str):
             value=", ".join(apprentice_mentions),
             inline=False
         )
-    # Add ticketing info as a single grouped field (notes then link)
+    # Add ticketing info as a single grouped field
     
     ticket_notes = info.get('ticket_notes', '')
+    ticket_price_range = info.get('ticket_price_range', '')
     ticket_url = info.get('ticket_url', '')
-    if ticket_notes or ticket_url:
+    if ticket_notes or ticket_price_range or ticket_url:
         parts = []
+        if ticket_price_range:
+            parts.append(f'Price Range: {ticket_price_range}')
         if ticket_notes:
             parts.append(str(ticket_notes))
         if ticket_url:
@@ -2063,18 +2068,23 @@ async def show_club_info(interaction: discord.Interaction, club: str):
             value=stadium['how_to_get_there'] if stadium['how_to_get_there'] else 'No transport information provided.',
             inline=False
         )
+        stadium_plan_embed.add_field(
+            name='Notes',
+            value=stadium['notes'] if stadium['notes'] else 'No notes provided.',
+            inline=False
+        )
         if stadium['plan_image_url']:
             stadium_plan_embed.set_image(url=stadium['plan_image_url'])
         embeds.append(stadium_plan_embed)
 
     await interaction.followup.send(embeds=embeds, allowed_mentions=discord.AllowedMentions.none())
 
-# Slash command: /add-ticketinginfo -> open a Modal to add ticket URL and notes
+# Slash command: /add-ticketinginfo -> open a Modal to add ticket URL, price range and notes
 @bot.tree.command(name="add-ticketinginfo", description="Add or update ticketing info for a club", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(country="The country of the club", club="The club to update")
 @app_commands.autocomplete(country=country_autocomplete, club=club_autocomplete)
 async def add_ticketinginfo_command(interaction: discord.Interaction, country: str, club: str):
-    """Opens a modal to set ticketing notes and URL for a club."""
+    """Opens a modal to set ticketing notes, price range and URL for a club."""
     club_id = db.get_club_id_by_name(club)
     if not club_id:
         await interaction.response.send_message(f"❌ Club '{club}' not found.", ephemeral=True)
@@ -2082,6 +2092,7 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
 
     field_labels = {
         'ticket_notes': 'Ticket Notes',
+        'ticket_price_range': 'Ticket Price Range',
         'ticket_url': 'Ticket URL',
     }
 
@@ -2093,22 +2104,27 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
     def _get_current_ticket_data(target_club_id: int):
         club_info = db.get_club_info(target_club_id)
         notes = club_info[9] if club_info and len(club_info) > 9 else None
-        url = club_info[10] if club_info and len(club_info) > 10 else None
+        price_range = club_info[10] if club_info and len(club_info) > 10 else None
+        url = club_info[11] if club_info and len(club_info) > 11 else None
         return {
             'ticket_notes': notes,
+            'ticket_price_range': price_range,
             'ticket_url': url,
         }
 
     def _apply_ticket_update(target_club_id: int, current_data: dict, proposed_data: dict, fields_to_apply: list[str]):
         ticket_notes = current_data.get('ticket_notes')
+        ticket_price_range = current_data.get('ticket_price_range')
         ticket_url = current_data.get('ticket_url')
 
         if 'ticket_notes' in fields_to_apply:
             ticket_notes = proposed_data.get('ticket_notes')
+        if 'ticket_price_range' in fields_to_apply:
+            ticket_price_range = proposed_data.get('ticket_price_range')
         if 'ticket_url' in fields_to_apply:
             ticket_url = proposed_data.get('ticket_url')
 
-        db.update_club_ticket_info(target_club_id, ticket_notes, ticket_url)
+        db.update_club_ticket_info(target_club_id, ticket_notes, ticket_price_range, ticket_url)
 
     class TicketFieldReviewView(discord.ui.View):
         def __init__(
@@ -2213,6 +2229,13 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
             required=False,
             placeholder="https://example.com/tickets"
         )
+        ticket_price_range = discord.ui.TextInput(
+            label="Ticket price range",
+            style=discord.TextStyle.short,
+            required=False,
+            max_length=120,
+            placeholder="e.g. 20-40€"
+        )
         ticket_notes = discord.ui.TextInput(
             label="Ticket notes",
             style=discord.TextStyle.paragraph,
@@ -2228,6 +2251,7 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
 
         async def on_submit(self, modal_interaction: discord.Interaction):
             url = self.ticket_url.value.strip()
+            price_range = self.ticket_price_range.value.strip()
             notes = self.ticket_notes.value.strip()
 
             if url and not re.match(r'^https?://', url):
@@ -2237,6 +2261,7 @@ async def add_ticketinginfo_command(interaction: discord.Interaction, country: s
             current_data = _get_current_ticket_data(self.club_id)
             proposed_data = {
                 'ticket_notes': notes if notes else None,
+                'ticket_price_range': price_range if price_range else None,
                 'ticket_url': url if url else None,
             }
 
@@ -2323,6 +2348,7 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
         'plan_image_url': 'Stadium Plan Image URL',
         'block_description': 'Block Description',
         'how_to_get_there': 'How To Get There',
+        'notes': 'Notes',
     }
 
     def _display_value(value):
@@ -2489,6 +2515,13 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
             max_length=1000,
             placeholder="Transport and access information."
         )
+        notes = discord.ui.TextInput(
+            label="Notes",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=1000,
+            placeholder="Additional stadium notes."
+        )
 
         def __init__(self, club_name, club_id, stadium_id, first_data):
             super().__init__()
@@ -2501,6 +2534,7 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
             plan_url = self.plan_image_url.value.strip()
             block_desc = self.block_description.value.strip()
             route_info = self.how_to_get_there.value.strip()
+            notes = self.notes.value.strip()
 
             if plan_url and not re.match(r'^https?://', plan_url):
                 await modal_interaction.response.send_message('Invalid stadium plan URL (must start with http:// or https://).', ephemeral=True)
@@ -2519,6 +2553,7 @@ async def add_stadiuminfo_command(interaction: discord.Interaction, country: str
                 'plan_image_url': plan_url if plan_url else None,
                 'block_description': block_desc if block_desc else None,
                 'how_to_get_there': route_info if route_info else None,
+                'notes': notes if notes else None,
             }
 
             changed_fields = []
